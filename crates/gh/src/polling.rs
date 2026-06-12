@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use thiserror::Error;
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::auth::Auth;
 use crate::client::{Client, ClientConfig, ClientError};
@@ -43,15 +43,45 @@ pub enum PollError {
     Auth(String),
 }
 
+/// One item emitted by the poller on its `items` channel. Lets the GUI
+/// surface transient errors and auth failures in the UI rather than only
+/// seeing successful event batches.
+#[derive(Debug, Clone)]
+pub enum PollItem {
+    /// A successful poll produced these events.
+    Events(Vec<RawEvent>),
+    /// A poll failed (transient — server error, network, rate-limit). The
+    /// poller keeps running; the UI can show a status line.
+    Error(String),
+    /// GitHub returned 401/403. Surfaced separately because it's terminal
+    /// (the PAT is wrong or expired) and the UI should be loud about it.
+    AuthError(String),
+}
+
+/// The result of a single poll cycle: events collected from sources that
+/// succeeded, and the per-source errors from sources that didn't.
+#[derive(Debug, Default)]
+pub struct PollOutcome {
+    pub events: Vec<RawEvent>,
+    pub errors: Vec<PollError>,
+}
+
 /// A handle to a running poller. The poller runs in the background; you read
-/// events from `events`. Drop the handle to stop it.
+/// items from `items`. Drop the handle to stop it.
 pub struct PollerHandle {
     join: tokio::task::JoinHandle<()>,
-    pub events: mpsc::Receiver<Vec<RawEvent>>,
+    pub items: mpsc::Receiver<PollItem>,
 }
 
 impl PollerHandle {
-    /// Stop the poller. Future `events.recv()` will return `None`.
+    /// Split the handle into its join handle and item receiver, so a
+    /// consumer can hand the receiver to another task while keeping the
+    /// join handle alive.
+    pub fn into_parts(self) -> (tokio::task::JoinHandle<()>, mpsc::Receiver<PollItem>) {
+        (self.join, self.items)
+    }
+
+    /// Stop the poller. Future `items.recv()` will return `None`.
     pub fn stop(self) {
         self.join.abort();
     }
@@ -86,65 +116,85 @@ impl Poller {
     }
 
     /// Start the poller in the background. Returns a handle for stopping it
-    /// and a receiver for events. Each poll produces one `Vec<RawEvent>`
-    /// batch on the channel.
+    /// and a receiver for items (events + per-poll errors).
     pub fn start(self) -> PollerHandle {
-        let (tx, rx) = mpsc::channel::<Vec<RawEvent>>(8);
+        let (tx, rx) = mpsc::channel::<PollItem>(8);
         let join = tokio::spawn(async move {
             self.run(tx).await;
         });
-        PollerHandle { join, events: rx }
+        PollerHandle { join, items: rx }
     }
 
-    async fn run(self, tx: mpsc::Sender<Vec<RawEvent>>) {
+    async fn run(self, tx: mpsc::Sender<PollItem>) {
         info!(interval = ?self.cfg.interval, "poller started");
         let mut ticker = tokio::time::interval(self.cfg.interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             ticker.tick().await;
-            match self.poll_once().await {
-                Ok(events) => {
-                    debug!(count = events.len(), "poll produced events");
-                    if !events.is_empty() && tx.send(events).await.is_err() {
-                        warn!("poller receiver dropped; stopping");
-                        break;
+            let outcome = self.poll_once().await;
+            for err in &outcome.errors {
+                let item = match err {
+                    PollError::Client(ClientError::Unauthorized(msg)) => {
+                        PollItem::AuthError(msg.clone())
                     }
+                    _ => PollItem::Error(err.to_string()),
+                };
+                if tx.send(item).await.is_err() {
+                    warn!("poller receiver dropped; stopping");
+                    return;
                 }
-                Err(e) => {
-                    error!(error = %e, "poll failed");
-                    // back off: wait a few seconds before next attempt
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+            if !outcome.events.is_empty() {
+                debug!(count = outcome.events.len(), "poll produced events");
+                if tx.send(PollItem::Events(outcome.events)).await.is_err() {
+                    warn!("poller receiver dropped; stopping");
+                    return;
                 }
+            }
+            if !outcome.errors.is_empty() {
+                // back off briefly so we don't spin on persistent errors
+                tokio::time::sleep(Duration::from_secs(5)).await;
             }
         }
     }
 
-    /// Run a single poll cycle across all configured sources. Useful in tests.
-    pub async fn poll_once(&self) -> Result<Vec<RawEvent>, PollError> {
-        let mut out = Vec::new();
+    /// Run a single poll cycle across all configured sources. Per-source
+    /// failures are collected into the returned outcome rather than
+    /// aborting the whole poll. Useful in tests.
+    pub async fn poll_once(&self) -> PollOutcome {
+        let mut out = PollOutcome::default();
         if let Some(user) = &self.cfg.username {
             match self.client.received_events(user).await {
-                Ok(mut evs) => out.append(&mut evs),
-                Err(e) => warn!(error = %e, "received_events failed"),
+                Ok(mut evs) => out.events.append(&mut evs),
+                Err(e) => {
+                    warn!(error = %e, "received_events failed");
+                    out.errors.push(e.into());
+                }
             }
         }
         for org in &self.cfg.orgs {
             match self.client.org_events(org).await {
-                Ok(mut evs) => out.append(&mut evs),
-                Err(e) => warn!(error = %e, org = %org, "org_events failed"),
+                Ok(mut evs) => out.events.append(&mut evs),
+                Err(e) => {
+                    warn!(error = %e, org = %org, "org_events failed");
+                    out.errors.push(e.into());
+                }
             }
         }
         for full in &self.cfg.repos {
             if let Some((owner, repo)) = full.split_once('/') {
                 match self.client.repo_events(owner, repo).await {
-                    Ok(mut evs) => out.append(&mut evs),
-                    Err(e) => warn!(error = %e, repo = %full, "repo_events failed"),
+                    Ok(mut evs) => out.events.append(&mut evs),
+                    Err(e) => {
+                        warn!(error = %e, repo = %full, "repo_events failed");
+                        out.errors.push(e.into());
+                    }
                 }
             } else {
                 warn!(repo = %full, "repo must be in 'owner/name' form");
             }
         }
-        Ok(out)
+        out
     }
 }
 
@@ -202,8 +252,85 @@ mod tests {
             },
         )
         .unwrap();
-        let events = poller.poll_once().await.unwrap();
-        assert_eq!(events.len(), 2, "received + orgs");
+        let outcome = poller.poll_once().await;
+        assert_eq!(outcome.events.len(), 2, "received + orgs");
+        assert!(outcome.errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn poll_once_surfaces_unauthorized_as_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+        let cfg = PollConfig {
+            username: Some("octocat".to_string()),
+            orgs: vec![],
+            repos: vec![],
+            interval: Duration::from_secs(60),
+        };
+        let poller = Poller::with_client_config(
+            test_auth(),
+            cfg,
+            ClientConfig {
+                base_url: server.uri(),
+                user_agent: "test".to_string(),
+                timeout: Duration::from_secs(5),
+            },
+        )
+        .unwrap();
+        let outcome = poller.poll_once().await;
+        assert!(outcome.events.is_empty());
+        assert_eq!(outcome.errors.len(), 1);
+        assert!(matches!(
+            outcome.errors[0],
+            PollError::Client(ClientError::Unauthorized(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn poll_once_partial_failure_returns_events_and_errors() {
+        let server = MockServer::start().await;
+        // received_events succeeds.
+        Mock::given(method("GET"))
+            .and(path("/users/octocat/received_events"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"[{
+                    "id": "1",
+                    "type": "IssuesEvent",
+                    "created_at": "2026-06-13T10:00:00Z",
+                    "repo": {"name": "x/y"},
+                    "payload": {"action": "opened", "issue": {"title": "Bug"}}
+                }]"#,
+            ))
+            .mount(&server)
+            .await;
+        // org_events returns 500.
+        Mock::given(method("GET"))
+            .and(path("/orgs/rust-lang/events"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let cfg = PollConfig {
+            username: Some("octocat".to_string()),
+            orgs: vec!["rust-lang".to_string()],
+            repos: vec![],
+            interval: Duration::from_secs(60),
+        };
+        let poller = Poller::with_client_config(
+            test_auth(),
+            cfg,
+            ClientConfig {
+                base_url: server.uri(),
+                user_agent: "test".to_string(),
+                timeout: Duration::from_secs(5),
+            },
+        )
+        .unwrap();
+        let outcome = poller.poll_once().await;
+        assert_eq!(outcome.events.len(), 1, "user source still works");
+        assert_eq!(outcome.errors.len(), 1, "org source failed");
     }
 
     #[tokio::test]

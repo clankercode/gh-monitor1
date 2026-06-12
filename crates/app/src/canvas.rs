@@ -41,6 +41,13 @@ impl TimelineProgram {
         self.snapshot = snap;
     }
 
+    /// Replace the per-node animation map. Called after a poll diff so the
+    /// canvas can drive fade-in and pulse animations from the same state
+    /// the app's `State` uses.
+    pub fn set_anims(&mut self, anims: HashMap<NodeId, NodeAnim>) {
+        self.anims = anims;
+    }
+
     pub fn last_pressed_url(&self) -> Option<String> {
         // Placeholder: the canvas's Program::update publishes the URL
         // directly. This method exists for the view's safety-net
@@ -80,7 +87,11 @@ impl Program<Message, iced::Theme, iced::Renderer> for TimelineProgram {
             let now = Instant::now();
             let opacity = anim.opacity_at(now);
             let pulse = anim.pulse_at(now);
-            let hovering = cursor_pos.is_some() && rect.contains(cursor_pos.unwrap());
+            let hovering = if let Some(p) = cursor_pos {
+                rect.contains(p)
+            } else {
+                false
+            };
             draw_node(
                 &mut frame,
                 node,

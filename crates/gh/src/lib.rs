@@ -21,4 +21,4 @@ pub mod polling;
 pub use auth::Auth;
 pub use client::{Client, ClientConfig, ClientError};
 pub use events::{EventKind, RawEvent};
-pub use polling::{PollConfig, PollError, Poller, PollerHandle};
+pub use polling::{PollConfig, PollError, PollItem, Poller, PollerHandle};

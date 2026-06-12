@@ -70,10 +70,26 @@ impl RawEvent {
     }
 }
 
-/// Parse a list of GitHub events from a JSON body.
+/// Parse a list of GitHub events from a JSON body. Individual events with
+/// unsupported types or actions are skipped (logged via `tracing::debug`)
+/// so one PushEvent in the batch doesn't drop every other event. Structural
+/// errors (bad JSON, missing required fields) still propagate.
 pub fn parse_events(body: &str) -> Result<Vec<RawEvent>, ParseError> {
     let raw: Vec<serde_json::Value> = serde_json::from_str(body)?;
-    raw.into_iter().map(parse_event).collect()
+    let mut out = Vec::with_capacity(raw.len());
+    for value in raw {
+        match parse_event(value) {
+            Ok(ev) => out.push(ev),
+            Err(ParseError::UnsupportedEvent(t)) => {
+                tracing::debug!(event_type = %t, "skipping unsupported event");
+            }
+            Err(ParseError::UnsupportedAction(a)) => {
+                tracing::debug!(action = %a, "skipping unsupported action");
+            }
+            Err(other) => return Err(other),
+        }
+    }
+    Ok(out)
 }
 
 /// Parse a single GitHub event.
@@ -358,11 +374,18 @@ mod tests {
                 "created_at": "2026-06-13T10:00:00Z",
                 "repo": {"name": "x/y"},
                 "payload": {"action": "opened", "issue": {"title": "Bug"}}
+            },
+            {
+                "id": "3",
+                "type": "PullRequestEvent",
+                "created_at": "2026-06-13T10:00:00Z",
+                "repo": {"name": "x/y"},
+                "payload": {"action": "closed", "pull_request": {"title": "X", "merged": false}}
             }
         ]"#;
-        // Note: parse_events doesn't filter; it returns Err on first failure.
-        // We may want filtering. For now, confirm what we do.
-        let res = parse_events(body);
-        assert!(res.is_err());
+        let res = parse_events(body).unwrap();
+        assert_eq!(res.len(), 1, "PushEvent + unmerged PR closed are filtered");
+        assert_eq!(res[0].id, "2");
+        assert_eq!(res[0].kind, EventKind::IssueOpened);
     }
 }

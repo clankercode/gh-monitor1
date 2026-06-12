@@ -19,7 +19,7 @@ build-release:
 
 # Build the app binary only
 build-app:
-    cargo build -p gh-monitor
+    cargo build -p gh-monitor-app
 
 # === Test ===
 
@@ -57,11 +57,11 @@ lint:
 
 # Run the app in debug
 run: build-app
-    cargo run -p gh-monitor
+    cargo run -p gh-monitor-app
 
 # Run the app in release
 run-release: build-release
-    cargo run -p gh-monitor --release
+    cargo run -p gh-monitor-app --release
 
 # === Clean ===
 
@@ -111,7 +111,7 @@ tree:
 
 # Show bloat in release
 bloat:
-    cargo bloat --release -p gh-monitor
+    cargo bloat --release -p gh-monitor-app
 
 # Show a summary of the project
 info:

@@ -13,7 +13,9 @@ pub struct RepoGroup {
 }
 
 /// Group `events` by `repo.full_name`. The resulting groups are ordered by
-/// their most recent event (newest group first).
+/// their most recent event (newest group first). Within each group,
+/// events are sorted by `created_at` ascending (oldest first), which is
+/// what the compression step expects.
 pub fn group_by_repo(mut events: Vec<RawEvent>) -> Vec<RepoGroup> {
     events.sort_by_key(|e| std::cmp::Reverse(e.repo_full_name()));
 
@@ -29,6 +31,9 @@ pub fn group_by_repo(mut events: Vec<RawEvent>) -> Vec<RepoGroup> {
             repo: ev.repo_full_name(),
             events: vec![ev],
         });
+    }
+    for g in &mut groups {
+        g.events.sort_by_key(|e| e.created_at);
     }
     groups
 }
@@ -86,6 +91,23 @@ mod tests {
         ];
         let groups = group_by_repo(events);
         assert_eq!(groups[0].events.len(), 3);
+        let times: Vec<_> = groups[0].events.iter().map(|e| e.created_at).collect();
+        let mut sorted = times.clone();
+        sorted.sort();
+        assert_eq!(times, sorted, "events should be oldest-first");
+    }
+
+    #[test]
+    fn sorts_within_group_even_when_input_unsorted() {
+        // Pass events in a non-chronological order; the output group must
+        // still be oldest-first.
+        let events = vec![
+            ev("a/b", EventKind::PrOpened, 50),
+            ev("a/b", EventKind::PrOpened, 200),
+            ev("a/b", EventKind::PrOpened, 100),
+        ];
+        let groups = group_by_repo(events);
+        assert_eq!(groups.len(), 1);
         let times: Vec<_> = groups[0].events.iter().map(|e| e.created_at).collect();
         let mut sorted = times.clone();
         sorted.sort();

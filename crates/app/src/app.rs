@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use gh_monitor_config::Config;
-use gh_monitor_gh::{Auth, PollConfig, Poller, PollerHandle, RawEvent};
+use gh_monitor_gh::{Auth, PollConfig, PollItem, Poller, RawEvent};
 use gh_monitor_timeline::snapshot::SnapshotDiff;
 use gh_monitor_timeline::{
     compress, diff, group_by_repo, CompressionConfig, NodeId, TimelineSnapshot,
@@ -36,7 +36,6 @@ pub struct AppSettings {
 pub struct State {
     pub config: Config,
     pub snapshot: TimelineSnapshot,
-    pub prev_snapshot: TimelineSnapshot,
     pub anims: HashMap<NodeId, NodeAnim>,
     pub overlay: OverlayState,
     pub poll_status: PollStatus,
@@ -56,8 +55,6 @@ pub enum PollStatus {
 /// Messages that drive the application.
 #[derive(Debug, Clone)]
 pub enum Message {
-    /// Animation frame tick.
-    Tick(Instant),
     /// A poll produced new raw events.
     Polled(Vec<RawEvent>),
     /// A poll errored (transient).
@@ -72,6 +69,9 @@ pub enum Message {
     OpenUrl(String),
     /// Window id resolved (or moved).
     WindowResolved(Id),
+    /// User pressed on a non-clickable area of the pane — start dragging
+    /// the window.
+    DragWindow,
     /// Escape pressed — quit.
     Escape,
     /// F5 pressed — refresh now.
@@ -84,7 +84,11 @@ pub fn run(settings: AppSettings) -> anyhow::Result<()> {
 
     let window = WindowSettings {
         size: Size::new(420.0, 540.0),
-        position: window::Position::Default,
+        position: initial
+            .window_position
+            .map_or(window::Position::Default, |p| {
+                window::Position::Specific(iced::Point::new(p.x as f32, p.y as f32))
+            }),
         resizable: false,
         closeable: true,
         minimizable: true,
@@ -96,14 +100,13 @@ pub fn run(settings: AppSettings) -> anyhow::Result<()> {
     };
 
     // Install the poller before starting the app.
-    let _poller_handle = install_poller_if_configured(&initial);
+    let _ = install_poller_if_configured(&initial);
 
     let result = iced::application(
         move || {
             let state = State {
                 config: initial.clone(),
                 snapshot: TimelineSnapshot::default(),
-                prev_snapshot: TimelineSnapshot::default(),
                 anims: HashMap::new(),
                 overlay: OverlayState::Idle,
                 poll_status: PollStatus::Idle,
@@ -126,12 +129,12 @@ pub fn run(settings: AppSettings) -> anyhow::Result<()> {
 
 fn update(state: &mut State, message: Message) -> Task<Message> {
     match message {
-        Message::Tick(_now) => Task::none(),
         Message::Polled(events) => {
             state.last_poll_at = Some(Instant::now());
             state.poll_status = PollStatus::Polling;
             apply_events(state, events);
             state.program.snapshot = state.snapshot.clone();
+            state.program.set_anims(state.anims.clone());
             Task::none()
         }
         Message::PollError(e) => {
@@ -168,6 +171,10 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                 OverlayState::Active => window::disable_mouse_passthrough(id),
             }
         }
+        Message::DragWindow => match state.window_id {
+            Some(id) => window::drag(id),
+            None => Task::none(),
+        },
         Message::Escape => iced::exit(),
         Message::Refresh => Task::none(),
     }
@@ -179,12 +186,14 @@ fn view(state: &State) -> Element<'_, Message, Theme, iced::Renderer> {
         .height(iced::Length::Fill);
     let area = iced::widget::MouseArea::new(canvas)
         .on_enter(Message::HoverEntered)
-        .on_exit(Message::HoverLeft);
+        .on_exit(Message::HoverLeft)
+        .on_press(Message::DragWindow);
     area.into()
 }
 
 fn subscription(_state: &State) -> Subscription<Message> {
-    let frames = window::frames().map(Message::Tick);
+    // Animations are read at draw time via `Animation::interpolate_with`,
+    // so no per-frame tick subscription is needed.
     let kb = event::listen_with(|e, status, _id| {
         if status == EventStatus::Ignored {
             if let Event::Keyboard(keyboard::Event::KeyPressed { key, .. }) = e {
@@ -200,7 +209,7 @@ fn subscription(_state: &State) -> Subscription<Message> {
     });
     let win = window::open_events().map(Message::WindowResolved);
     let poll = poll_subscription();
-    Subscription::batch([frames, kb, poll, win])
+    Subscription::batch([kb, poll, win])
 }
 
 fn theme(_state: &State) -> Option<Theme> {
@@ -218,7 +227,6 @@ fn apply_events(state: &mut State, events: Vec<RawEvent>) {
     let snap = TimelineSnapshot::from_compressed(compressed, now);
 
     let prev = std::mem::replace(&mut state.snapshot, snap.clone());
-    state.prev_snapshot = prev.clone();
 
     let d: SnapshotDiff = diff(&prev, &snap);
     let now_inst = Instant::now();
@@ -272,24 +280,19 @@ fn poll_subscription() -> Subscription<Message> {
     })
 }
 
-/// Items emitted by the poller into the GUI's stream.
-pub enum PollItem {
-    Events(Vec<RawEvent>),
-    Error(String),
-    AuthError(String),
-}
-
 use std::sync::Mutex;
 static POLL_RX: Mutex<Option<tokio::sync::mpsc::Receiver<PollItem>>> = Mutex::new(None);
 
-/// Install the poller before the app starts. Idempotent.
-pub fn install_poller_if_configured(initial: &Config) -> Option<PollerHandle> {
+/// Install the poller before the app starts. Idempotent. Returns `true` if
+/// the poller was started (PAT was set, sources were valid). The poller
+/// runs as a daemon tokio task — it lives until the process exits.
+pub fn install_poller_if_configured(initial: &Config) -> bool {
     if initial.pat.trim().is_empty() {
-        return None;
+        return false;
     }
     let auth = match Auth::new(initial.pat.clone()) {
         Ok(a) => a,
-        Err(_) => return None,
+        Err(_) => return false,
     };
     let poll_cfg = PollConfig {
         username: initial.username.clone(),
@@ -301,25 +304,18 @@ pub fn install_poller_if_configured(initial: &Config) -> Option<PollerHandle> {
         Ok(p) => p,
         Err(e) => {
             warn!(error = %e, "failed to construct poller");
-            return None;
+            return false;
         }
     };
-    let mut handle = poller.start();
-
-    // Forward raw events to PollItem through a fresh tokio channel.
-    let (tx, rx) = tokio::sync::mpsc::channel::<PollItem>(8);
-    let mut events = std::mem::replace(&mut handle.events, tokio::sync::mpsc::channel(1).1);
+    let (join, items) = poller.start().into_parts();
+    // The poller's task is detached: the join handle is kept alive by
+    // binding it to a long-lived tokio task that awaits it. The receiver
+    // is stashed for `poll_subscription` to read from.
     tokio::spawn(async move {
-        while let Some(batch) = events.recv().await {
-            if tx.send(PollItem::Events(batch)).await.is_err() {
-                break;
-            }
-        }
+        let _ = join.await;
     });
-
-    // Stash the receiver for poll_subscription to pick up.
     if let Ok(mut guard) = POLL_RX.lock() {
-        *guard = Some(rx);
+        *guard = Some(items);
     }
-    Some(handle)
+    true
 }
