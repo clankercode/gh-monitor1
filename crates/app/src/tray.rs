@@ -20,7 +20,10 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 /// Menu actions the tray can emit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TrayAction {
+pub enum TrayAction {
+    /// Toggle the overlay window's visibility (hide via Mode::Hidden
+    /// and show via Mode::Windowed).
+    ToggleVisible,
     /// Quit the app.
     Quit,
 }
@@ -61,9 +64,11 @@ pub fn spawn() -> Result<TrayHandle> {
 
     // Build the menu. IDs are arbitrary strings; we look them up when
     // the event fires.
+    let show_item = MenuItem::with_id("show", "Show / Hide", true, None);
     let quit_item = MenuItem::with_id("quit", "Quit", true, None);
 
     let menu = Menu::new();
+    menu.append(&show_item).context("append show")?;
     menu.append(&quit_item).context("append quit")?;
 
     let icon = make_icon().context("building tray icon")?;
@@ -72,6 +77,7 @@ pub fn spawn() -> Result<TrayHandle> {
     // before any events fire.
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
         let action = match event.id().0.as_str() {
+            "show" => TrayAction::ToggleVisible,
             "quit" => TrayAction::Quit,
             _ => return,
         };

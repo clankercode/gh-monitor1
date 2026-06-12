@@ -16,7 +16,7 @@ use iced::event::{self, Status as EventStatus};
 use iced::futures::SinkExt;
 use iced::keyboard::{self, key, Key};
 use iced::widget::canvas::Canvas;
-use iced::window::{self, Id, Level, Settings as WindowSettings};
+use iced::window::{self, Id, Level, Mode, Settings as WindowSettings};
 use iced::{Element, Event, Size, Subscription, Task, Theme};
 use tracing::{error, warn};
 
@@ -46,6 +46,8 @@ pub struct State {
     /// cursor leaves after a hover, we transition to `Idle` and stay in
     /// the normal hover-driven passthrough mode thereafter.
     pub has_hovered: bool,
+    /// Whether the window is currently hidden via `Mode::Hidden`.
+    pub hidden: bool,
     pub poll_status: PollStatus,
     pub last_poll_at: Option<Instant>,
     pub program: TimelineProgram,
@@ -125,6 +127,7 @@ pub fn run(settings: AppSettings) -> anyhow::Result<()> {
                 anims: HashMap::new(),
                 overlay: OverlayState::Active,
                 has_hovered: false,
+                hidden: false,
                 poll_status: PollStatus::Idle,
                 last_poll_at: None,
                 program: TimelineProgram::new(),
@@ -204,12 +207,18 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::Escape => iced::exit(),
         Message::Refresh => Task::none(),
         Message::TrayAction(TrayAction::Quit) => iced::exit(),
-        Message::ToggleVisible => {
-            // v0.1: no-op. The tray menu doesn't ship a "Show / Hide"
-            // item yet, and we don't yet track a hidden flag. A real
-            // implementation would call `window::set_visible(id, false)`
-            // and surface a "Show" tray menu entry when hidden.
-            Task::none()
+        Message::TrayAction(TrayAction::ToggleVisible) | Message::ToggleVisible => {
+            let id = state.window_id;
+            if let Some(id) = id {
+                state.hidden = !state.hidden;
+                if state.hidden {
+                    window::set_mode(id, Mode::Hidden)
+                } else {
+                    window::set_mode(id, Mode::Windowed)
+                }
+            } else {
+                Task::none()
+            }
         }
     }
 }
