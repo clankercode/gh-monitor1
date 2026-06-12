@@ -1,0 +1,41 @@
+[package]
+name = "gh-monitor-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Transparent always-on-top overlay timeline for GitHub activity"
+repository.workspace = true
+
+[lib]
+name = "gh_monitor_app"
+path = "src/lib.rs"
+
+[[bin]]
+name = "gh-monitor"
+path = "src/main.rs"
+
+[dependencies]
+gh-monitor-gh.workspace = true
+gh-monitor-timeline.workspace = true
+gh-monitor-config.workspace = true
+
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url.workspace = true
+open.workspace = true
+iced.workspace = true
+tray-icon.workspace = true
+dirs.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+wiremock.workspace = true
+proptest.workspace = true

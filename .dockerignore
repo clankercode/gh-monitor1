@@ -1,0 +1,12 @@
+target/
+.worktrees/
+.git/
+.github/
+.gitignore
+.dockerignore
+**/*.md
+!crates/*/README.md
+docs/
+**/*.log
+reviews/
+.notes/

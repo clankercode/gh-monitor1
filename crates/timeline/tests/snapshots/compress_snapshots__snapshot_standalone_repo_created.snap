@@ -1,0 +1,11 @@
+---
+source: crates/timeline/tests/compress_snapshots.rs
+assertion_line: 77
+expression: pretty(&nodes)
+---
+- id: standalone:fresh/repo:e1
+  repo: fresh/repo
+  span: 2026-06-13T11:59:30+00:00 .. 2026-06-13T11:59:30+00:00 (0)
+  standalone: true
+  pairs:
+    - kind: RepoCreated, count: 1

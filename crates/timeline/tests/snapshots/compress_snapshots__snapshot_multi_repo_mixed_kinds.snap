@@ -1,0 +1,19 @@
+---
+source: crates/timeline/tests/compress_snapshots.rs
+assertion_line: 66
+expression: pretty(&nodes)
+---
+- id: group:c/d:1781351940:ReleasePublished
+  repo: c/d
+  span: 2026-06-13T11:59:00+00:00 .. 2026-06-13T11:59:00+00:00 (0)
+  standalone: false
+  pairs:
+    - kind: ReleasePublished, count: 1
+- id: group:a/b:1781351800:PrOpened|PrMerged|IssueOpened
+  repo: a/b
+  span: 2026-06-13T11:56:40+00:00 .. 2026-06-13T11:58:20+00:00 (100)
+  standalone: false
+  pairs:
+    - kind: PrOpened, count: 1
+    - kind: PrMerged, count: 1
+    - kind: IssueOpened, count: 1

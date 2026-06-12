@@ -1,0 +1,69 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/gh",
+    "crates/timeline",
+    "crates/config",
+    "crates/app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.81"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/xertrov/gh-monitor"
+authors = ["xertrov"]
+
+[workspace.dependencies]
+# Internal crates
+gh-monitor-gh = { path = "crates/gh" }
+gh-monitor-timeline = { path = "crates/timeline" }
+gh-monitor-config = { path = "crates/config" }
+
+# Async
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "fs", "test-util"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Time
+chrono = { version = "0.4", default-features = false, features = ["serde", "clock"] }
+
+# Errors
+thiserror = "1"
+anyhow = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Misc
+url = { version = "2", features = ["serde"] }
+open = "5"
+humantime = "2"
+dirs = "5"
+toml = "0.8"
+
+# GUI
+iced = { version = "0.14", features = ["wgpu", "tokio", "markdown", "svg", "image", "canvas", "debug"] }
+tray-icon = "0.21"
+
+# Test-only
+insta = { version = "1", features = ["yaml", "redactions"] }
+wiremock = "0.6"
+proptest = "1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3
+strip = "debuginfo"
+panic = "abort"
+
+[profile.release-debug]
+inherits = "release"
+debug = true
+strip = false
