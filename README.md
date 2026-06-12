@@ -9,6 +9,7 @@ PR/issue/release in your browser.
 Built with Rust + Iced. One binary per platform. No Electron, no Tauri.
 
 ![status](https://img.shields.io/badge/status-pre--alpha-orange)
+![build](https://github.com/clankercode/gh-monitor1/actions/workflows/ci.yml/badge.svg)
 
 ## Features
 
@@ -19,61 +20,85 @@ Built with Rust + Iced. One binary per platform. No Electron, no Tauri.
 - **Repo-grouped events** — PRs and issues from the same repo collapse into
   one node with counts and a humanized time range
 - **Five event types** — PR opened, PR merged, issue opened, release
-  published, new repo created
+  published, new repo created (the last is rare + stands out)
+- **System tray** — Quit from the tray icon
+- **Deep links** — click any event to open the PR/issue/release in your
+  browser
 - **Single binary per platform** — no runtime, no installer needed
 
-## Status
+## Screenshots
 
-Pre-alpha. The scaffolding is in place. See `PLAN.md` for what we're building
-and where we are in the plan.
+> *Coming soon — the app is in pre-alpha. Once you have a config and a PAT,
+> the overlay looks like a small floating panel showing your activity
+> timeline.*
 
 ## Quick start (dev)
 
-Requires Rust 1.81+, `just`, and platform deps for Iced's wgpu backend
-(see [Iced's prerequisites](https://github.com/iced-rs/iced#prerequisites)).
+Requires Rust 1.81+ and `just`. On Linux you also need GTK 3, libxdo, and
+libappindicator for the tray icon. See [Iced's prerequisites](https://github.com/iced-rs/iced#prerequisites)
+plus `libgtk-3-dev libxdo-dev libayatana-appindicator3-dev`.
 
 ```bash
-git clone https://github.com/xertrov/gh-monitor
-cd gh-monitor
-just build           # debug build
-just test            # run all tests
-just run             # run the app
+git clone https://github.com/clankercode/gh-monitor1
+cd gh-monitor1
+just build
+just test
+just run
 ```
 
 ## Quick start (release binary)
 
 Pre-built binaries for Linux, macOS, and Windows are published on the
-[Releases](https://github.com/xertrov/gh-monitor/releases) page. Pick your
-platform, download, and run.
+[Releases](https://github.com/clankercode/gh-monitor1/releases) page. Pick
+your platform, download, and run.
 
 ## Configuration
 
-The app reads a `config.toml` from the platform's user config dir:
+`gh-monitor` reads a `config.toml` from the platform's user config dir:
 
 - Linux: `~/.config/gh-monitor/config.toml`
 - macOS: `~/Library/Application Support/gh-monitor/config.toml`
 - Windows: `%APPDATA%\gh-monitor\config.toml`
 
-Schema:
+Use the CLI to manage it:
+
+```bash
+gh-monitor config path        # print the config file path
+gh-monitor config print       # print the loaded config as TOML
+gh-monitor config edit        # open the config file in $EDITOR
+gh-monitor config validate    # validate the config and exit
+```
+
+### Config schema
 
 ```toml
 # Personal access token (required)
 pat = "ghp_..."
 
-# Orgs to watch (events for these orgs will be fetched from /orgs/{org}/events)
+# GitHub username (used to fetch `received_events`)
+username = "octocat"
+
+# Orgs to watch (events fetched from /orgs/{org}/events)
 orgs = ["rust-lang", "tokio-rs"]
 
 # Individual repos to watch (in addition to the above orgs)
 repos = ["octocat/Hello-World"]
 
-# Optional: how often to poll, in seconds. Default 30.
+# Poll interval in seconds. Default 30.
 poll_interval_secs = 30
+```
+
+You can also point the app at a config by setting environment variables
+before launch (used as defaults if the config file is missing):
+
+```bash
+GH_MONITOR_PAT=ghp_... GH_MONITOR_USERNAME=octocat gh-monitor
 ```
 
 ## Architecture
 
-See `PLAN.md` for the design pillars and `docs/architecture.md` for the
-module/crate map. The TL;DR:
+See [`docs/architecture.md`](docs/architecture.md) for the module/crate
+responsibilities and data flow. The TL;DR:
 
 - `crates/gh` — GitHub REST client + polling loop. Pure logic, no GUI.
 - `crates/timeline` — group events by repo, compress similar events,
@@ -92,6 +117,20 @@ just test-review    # review insta snapshots
 just bloat          # see what's bloating the release binary
 ```
 
+The project follows the conventions in [`AGENTS.md`](AGENTS.md).
+
+## Status
+
+Pre-alpha. Core functionality is implemented (transparent overlay, hover
+passthrough, click+drag, deep links, animations, tray icon, polling).
+What's still in progress:
+
+- Window-position persistence on move (currently restored on boot only)
+- GUI settings panel (use the CLI for now: `gh-monitor config edit`)
+- Headless Iced smoke test (deferred — needs an offscreen render target)
+
+See [`PLAN.md`](PLAN.md) for the full plan and open questions.
+
 ## License
 
-TBD (likely MIT or Apache-2.0).
+MIT or Apache-2.0, at your option.

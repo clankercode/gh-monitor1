@@ -50,6 +50,7 @@ toml = "0.8"
 # GUI
 iced = { version = "0.14", features = ["wgpu", "tokio", "markdown", "svg", "image", "canvas", "debug"] }
 tray-icon = "0.21"
+gtk = "0.18"
 
 # Test-only
 insta = { version = "1", features = ["yaml", "redactions"] }

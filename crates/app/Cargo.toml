@@ -34,8 +34,15 @@ iced.workspace = true
 tray-icon.workspace = true
 dirs.workspace = true
 toml.workspace = true
+gtk = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = { workspace = true }
 
 [dev-dependencies]
 insta.workspace = true
 wiremock.workspace = true
 proptest.workspace = true
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+gtk = { workspace = true }
