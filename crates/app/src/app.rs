@@ -91,8 +91,6 @@ pub enum Message {
     Refresh,
     /// Tray menu fired an action.
     TrayAction(TrayAction),
-    /// Toggle the overlay window's visibility.
-    ToggleVisible,
 }
 
 /// Run the application. Blocks until the window is closed.
@@ -205,19 +203,20 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::WindowMoved(p) => {
             // Persist the new position to the config. We update the
-            // in-memory config and write to disk; this is called on
-            // every move so we keep a small per-move write cost.
+            // in-memory config and write to disk. Writes happen on
+            // every move event (the config is small — ~100 bytes —
+            // and the OS will coalesce), so the user gets
+            // position-persisted-on-quit semantics with no extra
+            // plumbing.
             state.config.window_position = Some(WindowPosition {
                 x: p.x as i32,
                 y: p.y as i32,
             });
             let cfg = state.config.clone();
-            // Spawn a write task so we don't block the UI on disk I/O.
             iced::Task::future(async move {
                 if let Err(e) = crate::config_io::save_config(&cfg) {
                     warn!(error = %e, "failed to persist window position");
                 }
-                Message::Refresh // dummy message
             })
             .discard()
         }
@@ -228,7 +227,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::Escape => iced::exit(),
         Message::Refresh => Task::none(),
         Message::TrayAction(TrayAction::Quit) => iced::exit(),
-        Message::TrayAction(TrayAction::ToggleVisible) | Message::ToggleVisible => {
+        Message::TrayAction(TrayAction::ToggleVisible) => {
             let id = state.window_id;
             if let Some(id) = id {
                 state.hidden = !state.hidden;
