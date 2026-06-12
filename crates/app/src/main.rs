@@ -3,7 +3,7 @@ use std::process::Command;
 use anyhow::{Context, Result};
 use tracing::info;
 
-use gh_monitor_app::config_io::{config_path, load_config, save_config};
+use gh_monitor_app::config_io::{config_path, ensure_template, load_config};
 use gh_monitor_app::tray;
 use gh_monitor_app::{run, AppSettings};
 
@@ -91,14 +91,11 @@ fn handle_config(args: &[String]) -> Result<()> {
         },
         "edit" => {
             // Open $VISUAL or $EDITOR in the config file's parent
-            // directory (creating the file if missing).
+            // directory. If the file doesn't exist yet, drop a safe
+            // template (no PAT, no env-populated secrets) for the
+            // user to fill in.
             let path = config_path();
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).ok();
-            }
-            if !path.exists() {
-                save_config(&default_config())?;
-            }
+            ensure_template(&path).context("creating config template")?;
             let editor = std::env::var("VISUAL")
                 .or_else(|_| std::env::var("EDITOR"))
                 .unwrap_or_else(|_| {
@@ -119,30 +116,6 @@ fn handle_config(args: &[String]) -> Result<()> {
             eprintln!("usage: gh-monitor config <path|print|edit|validate>");
             std::process::exit(2);
         }
-    }
-}
-
-fn default_config() -> gh_monitor_config::Config {
-    use std::env;
-    gh_monitor_config::Config {
-        pat: env::var("GH_MONITOR_PAT").unwrap_or_default(),
-        username: env::var("GH_MONITOR_USERNAME").ok(),
-        orgs: env::var("GH_MONITOR_ORGS")
-            .unwrap_or_default()
-            .split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
-            .collect(),
-        repos: env::var("GH_MONITOR_REPOS")
-            .unwrap_or_default()
-            .split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
-            .collect(),
-        poll_interval_secs: 30,
-        window_position: None,
     }
 }
 

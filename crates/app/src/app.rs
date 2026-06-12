@@ -203,9 +203,9 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::Escape => iced::exit(),
         Message::Refresh => Task::none(),
         Message::TrayAction(TrayAction::Quit) => iced::exit(),
-        Message::TrayAction(TrayAction::ToggleVisible) | Message::ToggleVisible => {
-            // Toggle the window's visibility. We don't yet track a
-            // "hidden" flag, so this is a no-op placeholder — a real
+        Message::ToggleVisible => {
+            // v0.1: no-op. The tray menu doesn't ship a "Show / Hide"
+            // item yet, and we don't yet track a hidden flag. A real
             // implementation would call `window::set_visible(id, false)`
             // and surface a "Show" tray menu entry when hidden.
             Task::none()

@@ -13,6 +13,42 @@ pub fn config_path() -> PathBuf {
         .join("config.toml")
 }
 
+/// A config file template shown to first-time users when they run
+/// `gh-monitor config edit`. Safe to write to disk — it contains no
+/// secrets and pulls nothing from the environment.
+pub const CONFIG_TEMPLATE: &str = r#"# gh-monitor config
+# See: https://github.com/clankercode/gh-monitor1
+
+# Personal access token (required)
+pat = ""
+
+# GitHub username (used to fetch `received_events`)
+# username = "octocat"
+
+# Orgs to watch
+# orgs = ["rust-lang"]
+
+# Repos to watch ("owner/name")
+# repos = ["octocat/Hello-World"]
+
+# Poll interval in seconds
+poll_interval_secs = 30
+"#;
+
+/// Write the config template to `path` if no file is there yet. Returns
+/// `true` if a new file was written.
+pub fn ensure_template(path: &std::path::Path) -> Result<bool> {
+    if path.exists() {
+        return Ok(false);
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    std::fs::write(path, CONFIG_TEMPLATE).with_context(|| format!("writing {}", path.display()))?;
+    Ok(true)
+}
+
 /// Load the config from disk, falling back to a default if the file
 /// doesn't exist.
 pub fn load_config() -> Result<Config> {
@@ -39,7 +75,9 @@ pub fn save_config(cfg: &Config) -> Result<()> {
     Ok(())
 }
 
-/// A fresh, empty config. Used when the file is missing.
+/// A fresh, empty config. Used when the file is missing. Environment
+/// variables provide defaults for the PAT, username, and watched
+/// orgs/repos so the app can run with no config file at all.
 pub fn default_config() -> Config {
     let pat = std::env::var("GH_MONITOR_PAT").unwrap_or_default();
     let username = std::env::var("GH_MONITOR_USERNAME").ok();
