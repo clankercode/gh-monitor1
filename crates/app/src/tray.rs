@@ -53,6 +53,15 @@ pub fn spawn() -> Result<TrayHandle> {
         *slot = Some(rx);
     }
 
+    // On Linux, `Menu::new()` panics unless GTK has been initialized.
+    // Other platforms don't need this.
+    #[cfg(target_os = "linux")]
+    {
+        if let Err(e) = gtk::init() {
+            return Err(anyhow::anyhow!("gtk::init failed: {e}"));
+        }
+    }
+
     // Build the menu. IDs are arbitrary strings; we look them up when
     // the event fires.
     let show_item = MenuItem::with_id("show", "Show / Hide", true, None);

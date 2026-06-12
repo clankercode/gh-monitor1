@@ -11,7 +11,7 @@ pub mod config_io;
 mod link;
 mod overlay;
 mod paint;
-mod tray;
+pub mod tray;
 
 pub use app::{run, AppSettings};
 pub use config_io::load_config;
