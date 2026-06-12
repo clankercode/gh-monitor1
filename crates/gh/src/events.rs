@@ -52,7 +52,10 @@ impl RawEvent {
     #[doc(hidden)]
     pub fn for_test(repo_full_name: String, kind: EventKind, created_at: DateTime<Utc>) -> Self {
         Self {
-            id: format!("test-{}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)),
+            id: format!(
+                "test-{}",
+                chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+            ),
             kind,
             repo_full_name,
             created_at,

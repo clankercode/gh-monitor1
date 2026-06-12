@@ -20,10 +20,10 @@ pub fn load_config() -> Result<Config> {
     if !path.exists() {
         return Ok(default_config());
     }
-    let body = std::fs::read_to_string(&path)
-        .with_context(|| format!("reading {}", path.display()))?;
-    let cfg: Config = toml::from_str(&body)
-        .with_context(|| format!("parsing {}", path.display()))?;
+    let body =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let cfg: Config =
+        toml::from_str(&body).with_context(|| format!("parsing {}", path.display()))?;
     Ok(cfg)
 }
 

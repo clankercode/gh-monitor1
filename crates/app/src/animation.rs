@@ -1,10 +1,9 @@
 //! Per-node animation state. Each timeline node has an opacity animation
 //! (fade-in on insert) and a pulse animation (transient on update).
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use iced::animation::{Animation, Easing};
-use std::time::Duration;
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]

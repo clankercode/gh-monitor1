@@ -41,7 +41,11 @@ mod tests {
 
     fn ev(repo: &str, kind: EventKind, secs_ago: i64) -> RawEvent {
         let now = Utc::now();
-        RawEvent::for_test(repo.to_string(), kind, now - chrono::Duration::seconds(secs_ago))
+        RawEvent::for_test(
+            repo.to_string(),
+            kind,
+            now - chrono::Duration::seconds(secs_ago),
+        )
     }
 
     #[test]

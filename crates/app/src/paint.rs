@@ -49,7 +49,13 @@ pub fn layout(snapshot: &TimelineSnapshot, max_width: f32) -> (Vec<NodeRect>, Ca
         y += NODE_HEIGHT + NODE_GAP;
     }
     let total_height = y + PADDING;
-    (rects, CanvasSize { width, height: total_height })
+    (
+        rects,
+        CanvasSize {
+            width,
+            height: total_height,
+        },
+    )
 }
 
 /// Build a deep-link URL for a node, pointing at the repo's activity page.
@@ -137,7 +143,9 @@ mod tests {
 
     #[test]
     fn hit_test_inside() {
-        let snap = TimelineSnapshot { nodes: vec![node("a/b", NodeKind::Group)] };
+        let snap = TimelineSnapshot {
+            nodes: vec![node("a/b", NodeKind::Group)],
+        };
         let (rects, _) = layout(&snap, 400.0);
         let inside = iced::Point::new(rects[0].x + 5.0, rects[0].y + 5.0);
         let outside = iced::Point::new(0.0, 0.0);

@@ -57,7 +57,7 @@ impl Program<Message, iced::Theme, iced::Renderer> for TimelineProgram {
         &self,
         _state: &Self::State,
         renderer: &iced::Renderer,
-        theme: &iced::Theme,
+        _theme: &iced::Theme,
         bounds: Rectangle,
         cursor: Cursor,
     ) -> Vec<Geometry> {
@@ -89,7 +89,6 @@ impl Program<Message, iced::Theme, iced::Renderer> for TimelineProgram {
                 pulse,
                 hovering,
                 NodeClass::from_node_kind(node.kind),
-                theme,
             );
         }
 
@@ -174,7 +173,6 @@ fn draw_node(
     pulse: f32,
     hovering: bool,
     class: NodeClass,
-    _theme: &iced::Theme,
 ) {
     let bg_color = match class {
         NodeClass::Group => Color {

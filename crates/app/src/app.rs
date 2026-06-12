@@ -6,9 +6,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use gh_monitor_config::Config;
-use gh_monitor_gh::{
-    Auth, PollConfig, Poller, PollerHandle, RawEvent,
-};
+use gh_monitor_gh::{Auth, PollConfig, Poller, PollerHandle, RawEvent};
 use gh_monitor_timeline::snapshot::SnapshotDiff;
 use gh_monitor_timeline::{
     compress, diff, group_by_repo, CompressionConfig, NodeId, TimelineSnapshot,
@@ -149,12 +147,14 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::HoverEntered => {
             state.overlay = OverlayState::Active;
             let id = state.window_id;
-            id.map(window::disable_mouse_passthrough).unwrap_or_else(Task::none)
+            id.map(window::disable_mouse_passthrough)
+                .unwrap_or_else(Task::none)
         }
         Message::HoverLeft => {
             state.overlay = OverlayState::Idle;
             let id = state.window_id;
-            id.map(window::enable_mouse_passthrough).unwrap_or_else(Task::none)
+            id.map(window::enable_mouse_passthrough)
+                .unwrap_or_else(Task::none)
         }
         Message::OpenUrl(url) => {
             open_url(&url);
@@ -163,11 +163,10 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::WindowResolved(id) => {
             state.window_id = Some(id);
             state.program.window_id = Some(id);
-            let passthrough = match state.overlay {
+            match state.overlay {
                 OverlayState::Idle => window::enable_mouse_passthrough(id),
                 OverlayState::Active => window::disable_mouse_passthrough(id),
-            };
-            passthrough
+            }
         }
         Message::Escape => iced::exit(),
         Message::Refresh => Task::none(),
@@ -247,26 +246,29 @@ fn apply_events(state: &mut State, events: Vec<RawEvent>) {
 /// The poll subscription. Bridges a tokio channel into Iced's stream API.
 fn poll_subscription() -> Subscription<Message> {
     Subscription::run(|| {
-        iced::stream::channel(8, async move |mut output: iced::futures::channel::mpsc::Sender<Message>| {
-            let rx = match POLL_RX.lock() {
-                Ok(mut g) => g.take(),
-                Err(_) => None,
-            };
-            let Some(mut rx) = rx else {
-                warn!("poll subscription: no receiver; exiting");
-                return;
-            };
-            while let Some(item) = rx.recv().await {
-                let msg = match item {
-                    PollItem::Events(events) => Message::Polled(events),
-                    PollItem::Error(e) => Message::PollError(e),
-                    PollItem::AuthError(e) => Message::AuthError(e),
+        iced::stream::channel(
+            8,
+            async move |mut output: iced::futures::channel::mpsc::Sender<Message>| {
+                let rx = match POLL_RX.lock() {
+                    Ok(mut g) => g.take(),
+                    Err(_) => None,
                 };
-                if output.send(msg).await.is_err() {
-                    break;
+                let Some(mut rx) = rx else {
+                    warn!("poll subscription: no receiver; exiting");
+                    return;
+                };
+                while let Some(item) = rx.recv().await {
+                    let msg = match item {
+                        PollItem::Events(events) => Message::Polled(events),
+                        PollItem::Error(e) => Message::PollError(e),
+                        PollItem::AuthError(e) => Message::AuthError(e),
+                    };
+                    if output.send(msg).await.is_err() {
+                        break;
+                    }
                 }
-            }
-        })
+            },
+        )
     })
 }
 

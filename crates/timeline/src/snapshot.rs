@@ -58,8 +58,9 @@ impl TimelineSnapshot {
         let nodes = compressed
             .into_iter()
             .map(|n| {
-                let time_label =
-                    crate::humanize::humanize_range(n.earliest, n.latest, now).as_str().to_string();
+                let time_label = crate::humanize::humanize_range(n.earliest, n.latest, now)
+                    .as_str()
+                    .to_string();
                 TimelineNode {
                     id: NodeId::new(n.id),
                     kind: if n.standalone {
@@ -164,7 +165,10 @@ mod tests {
             id: NodeId::new("a"),
             kind: NodeKind::Group,
             repo: "x/y".to_string(),
-            pairs: vec![(KindCount { kind: EventKind::PrOpened, count: 1 },)],
+            pairs: vec![(KindCount {
+                kind: EventKind::PrOpened,
+                count: 1,
+            },)],
             time_label: "1 hr ago".to_string(),
             earliest: Utc::now(),
             latest: Utc::now(),
@@ -173,13 +177,20 @@ mod tests {
             id: NodeId::new("b"),
             kind: NodeKind::Group,
             repo: "x/y".to_string(),
-            pairs: vec![(KindCount { kind: EventKind::PrOpened, count: 1 },)],
+            pairs: vec![(KindCount {
+                kind: EventKind::PrOpened,
+                count: 1,
+            },)],
             time_label: "1 hr ago".to_string(),
             earliest: Utc::now(),
             latest: Utc::now(),
         };
-        let prev = TimelineSnapshot { nodes: vec![n1.clone()] };
-        let next = TimelineSnapshot { nodes: vec![n1, n2] };
+        let prev = TimelineSnapshot {
+            nodes: vec![n1.clone()],
+        };
+        let next = TimelineSnapshot {
+            nodes: vec![n1, n2],
+        };
         let d = diff(&prev, &next);
         assert_eq!(d.added.len(), 1);
         assert_eq!(d.added[0].as_str(), "b");
@@ -193,7 +204,10 @@ mod tests {
             id: NodeId::new("a"),
             kind: NodeKind::Group,
             repo: "x/y".to_string(),
-            pairs: vec![(KindCount { kind: EventKind::PrOpened, count: 1 },)],
+            pairs: vec![(KindCount {
+                kind: EventKind::PrOpened,
+                count: 1,
+            },)],
             time_label: "1 hr ago".to_string(),
             earliest: Utc::now(),
             latest: Utc::now(),

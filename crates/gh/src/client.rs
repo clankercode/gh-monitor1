@@ -101,9 +101,7 @@ impl Client {
             warn!("GitHub rate-limited us");
             return Err(ClientError::RateLimited);
         }
-        if status == reqwest::StatusCode::UNAUTHORIZED
-            || status == reqwest::StatusCode::FORBIDDEN
-        {
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
             return Err(ClientError::Unauthorized(status.to_string()));
         }
         if status.is_server_error() {
@@ -148,11 +146,14 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = Client::new(test_auth(), ClientConfig {
-            base_url: server.uri(),
-            user_agent: "test".to_string(),
-            timeout: Duration::from_secs(5),
-        })
+        let client = Client::new(
+            test_auth(),
+            ClientConfig {
+                base_url: server.uri(),
+                user_agent: "test".to_string(),
+                timeout: Duration::from_secs(5),
+            },
+        )
         .unwrap();
         let events = client.received_events("octocat").await.unwrap();
         assert_eq!(events.len(), 1);
@@ -166,11 +167,14 @@ mod tests {
             .respond_with(ResponseTemplate::new(429))
             .mount(&server)
             .await;
-        let client = Client::new(test_auth(), ClientConfig {
-            base_url: server.uri(),
-            user_agent: "test".to_string(),
-            timeout: Duration::from_secs(5),
-        })
+        let client = Client::new(
+            test_auth(),
+            ClientConfig {
+                base_url: server.uri(),
+                user_agent: "test".to_string(),
+                timeout: Duration::from_secs(5),
+            },
+        )
         .unwrap();
         let r = client.received_events("u").await;
         assert!(matches!(r, Err(ClientError::RateLimited)));
@@ -183,11 +187,14 @@ mod tests {
             .respond_with(ResponseTemplate::new(401))
             .mount(&server)
             .await;
-        let client = Client::new(test_auth(), ClientConfig {
-            base_url: server.uri(),
-            user_agent: "test".to_string(),
-            timeout: Duration::from_secs(5),
-        })
+        let client = Client::new(
+            test_auth(),
+            ClientConfig {
+                base_url: server.uri(),
+                user_agent: "test".to_string(),
+                timeout: Duration::from_secs(5),
+            },
+        )
         .unwrap();
         let r = client.received_events("u").await;
         assert!(matches!(r, Err(ClientError::Unauthorized(_))));

@@ -105,9 +105,7 @@ impl Poller {
             match self.poll_once().await {
                 Ok(events) => {
                     debug!(count = events.len(), "poll produced events");
-                    if !events.is_empty()
-                        && tx.send(events).await.is_err()
-                    {
+                    if !events.is_empty() && tx.send(events).await.is_err() {
                         warn!("poller receiver dropped; stopping");
                         break;
                     }

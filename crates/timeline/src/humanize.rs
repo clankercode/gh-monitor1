@@ -24,7 +24,11 @@ impl HumanRange {
 /// Format the span between `earliest` and `latest` (relative to `now`) as a
 /// humanized string. If `earliest == latest` (or very close), produces a
 /// "Point". Otherwise produces a "Range" like "1-3 hrs ago".
-pub fn humanize_range(earliest: DateTime<Utc>, latest: DateTime<Utc>, now: DateTime<Utc>) -> HumanRange {
+pub fn humanize_range(
+    earliest: DateTime<Utc>,
+    latest: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> HumanRange {
     let span = latest - earliest;
     let span_secs = span.num_seconds().abs();
 

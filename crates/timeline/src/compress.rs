@@ -60,7 +60,10 @@ pub struct CompressedNode {
 impl CompressedNode {
     /// The repo's display name (after the slash).
     pub fn repo_short(&self) -> &str {
-        self.repo.split_once('/').map(|(_, n)| n).unwrap_or(&self.repo)
+        self.repo
+            .split_once('/')
+            .map(|(_, n)| n)
+            .unwrap_or(&self.repo)
     }
 }
 
@@ -139,8 +142,7 @@ fn standalone_node(ev: &RawEvent) -> CompressedNode {
 }
 
 fn compress_chunk(repo: &str, chunk: &[&RawEvent]) -> CompressedNode {
-    let mut counts: std::collections::BTreeMap<EventKind, u32> =
-        std::collections::BTreeMap::new();
+    let mut counts: std::collections::BTreeMap<EventKind, u32> = std::collections::BTreeMap::new();
     let mut earliest = chunk[0].created_at;
     let mut latest = chunk[0].created_at;
     for ev in chunk {
@@ -159,7 +161,12 @@ fn compress_chunk(repo: &str, chunk: &[&RawEvent]) -> CompressedNode {
 
     // Stable id: repo + earliest timestamp + sorted kinds.
     let kinds: Vec<String> = pairs.iter().map(|p| format!("{:?}", p.kind)).collect();
-    let id = format!("group:{}:{}:{}", repo, earliest.timestamp(), kinds.join("|"));
+    let id = format!(
+        "group:{}:{}:{}",
+        repo,
+        earliest.timestamp(),
+        kinds.join("|")
+    );
 
     CompressedNode {
         id,
