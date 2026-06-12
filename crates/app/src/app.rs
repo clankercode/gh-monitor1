@@ -149,18 +149,19 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             state.last_poll_at = Some(Instant::now());
             state.poll_status = PollStatus::Polling;
             apply_events(state, events);
-            state.program.snapshot = state.snapshot.clone();
-            state.program.set_anims(state.anims.clone());
+            sync_program(state);
             Task::none()
         }
         Message::PollError(e) => {
             warn!(error = %e, "poll error");
             state.poll_status = PollStatus::Error(e);
+            sync_program(state);
             Task::none()
         }
         Message::AuthError(e) => {
             error!(error = %e, "auth error");
             state.poll_status = PollStatus::AuthError(e);
+            sync_program(state);
             Task::none()
         }
         Message::HoverEntered => {
@@ -287,6 +288,20 @@ fn apply_events(state: &mut State, events: Vec<RawEvent>) {
     for id in to_remove {
         state.anims.remove(&id);
     }
+}
+
+/// Push the current state into the canvas program. Called after any
+/// state change that affects the rendered view.
+fn sync_program(state: &mut State) {
+    state.program.snapshot = state.snapshot.clone();
+    state.program.set_anims(state.anims.clone());
+    state.program.needs_setup = state.config.pat.trim().is_empty();
+    state.program.status = match &state.poll_status {
+        PollStatus::Idle => None,
+        PollStatus::Polling => None,
+        PollStatus::Error(e) => Some(format!("polling: {e}")),
+        PollStatus::AuthError(e) => Some(format!("auth failed: {e}")),
+    };
 }
 
 /// Deduplicate events by their GitHub `id`. The first occurrence wins.
