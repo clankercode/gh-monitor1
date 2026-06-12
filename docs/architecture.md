@@ -104,15 +104,33 @@ Read at draw time via `opacity_at(now)` / `pulse_at(now)`. Driven by the
 ## Data flow on poll
 
 1. The poller fetches `received_events` + per-org + per-repo events.
-2. Each batch is sent through a tokio channel.
+2. For each source, the poller emits one or more `PollItem`s tagged
+   with a `&'static str` source label (`"received"`, `"org/rust-lang"`,
+   `"repo/octocat/Hello-World"`):
+   - `PollItem::Events(source, events)` — successful poll, possibly
+     with no events.
+   - `PollItem::Error(source, msg)` — transient error.
+   - `PollItem::AuthError(source, msg)` — 401/403 (fatal).
 3. The Iced poll subscription reads from that channel and produces
-   `Message::Polled(Vec<RawEvent>)`.
-4. `update(Polled)` runs `apply_events`:
+   per-source `Message::Polled(source, events)`,
+   `Message::PollError(source, msg)`, or
+   `Message::AuthError(source, msg)`.
+4. `update` runs `apply_events` (the function is source-agnostic; it
+   dedupes by id then groups/compresses the merged events):
    - `group_by_repo` → `compress` → `TimelineSnapshot::from_compressed`.
    - `diff(prev, next)` produces added/updated/removed lists.
    - Per-node animations are inserted/updated/evicted.
+   - The per-source `PollStatus` is updated: the source is recorded
+     as `Ok` / `Error(msg)` / `AuthError(msg)` and the entry is moved
+     to the back of the list (most-recently-updated last).
 5. The canvas reads the snapshot + per-node animations on the next
-   `Tick` from `window::frames()`.
+   `Tick` from `window::frames()`. The status banner is formatted by
+   `app::format_poll_status`:
+   - All sources `Ok` (or none yet) → no banner.
+   - Exactly one source has a non-`Ok` status →
+     `"<source>: <message>"` (with the `org/` or `repo/` prefix
+     stripped for display).
+   - Two or more errored sources → `"polling (<ok>/<total> ok)"`.
 
 ## Threading
 

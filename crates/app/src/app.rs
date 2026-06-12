@@ -55,23 +55,133 @@ pub struct State {
     pub window_id: Option<Id>,
 }
 
+/// Per-source poll status, in the order the sources were last updated.
+/// The most recently updated source is at the back.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PollStatus {
+    sources: Vec<SourceStatus>,
+}
+
+/// One source's poll status.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PollStatus {
-    Idle,
-    Polling,
+pub struct SourceStatus {
+    /// Source label (e.g. `"received"`, `"org/rust-lang"`,
+    /// `"repo/octocat/Hello-World"`).
+    pub source: &'static str,
+    pub kind: SourceStatusKind,
+}
+
+/// What state a source is in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourceStatusKind {
+    /// The source was polled and returned events (or no events). Clears
+    /// the status banner for this source.
+    Ok,
+    /// Transient error from this source (server error, network, rate
+    /// limit). Polling continues.
     Error(String),
+    /// Fatal auth error from this source. The PAT is wrong or expired.
     AuthError(String),
+}
+
+impl PollStatus {
+    /// Record a successful poll from `source`. Moves an existing entry for
+    /// the same source to the back, so it becomes the most-recent.
+    pub(crate) fn record_ok(&mut self, source: &'static str) {
+        self.sources.retain(|s| s.source != source);
+        self.sources.push(SourceStatus {
+            source,
+            kind: SourceStatusKind::Ok,
+        });
+    }
+
+    /// Record a transient error from `source`.
+    pub(crate) fn record_error(&mut self, source: &'static str, msg: String) {
+        self.sources.retain(|s| s.source != source);
+        self.sources.push(SourceStatus {
+            source,
+            kind: SourceStatusKind::Error(msg),
+        });
+    }
+
+    /// Record a fatal auth error from `source`.
+    pub(crate) fn record_auth_error(&mut self, source: &'static str, msg: String) {
+        self.sources.retain(|s| s.source != source);
+        self.sources.push(SourceStatus {
+            source,
+            kind: SourceStatusKind::AuthError(msg),
+        });
+    }
+
+    /// Number of sources tracked.
+    pub fn len(&self) -> usize {
+        self.sources.len()
+    }
+
+    /// `true` if no sources have been polled yet.
+    pub fn is_empty(&self) -> bool {
+        self.sources.is_empty()
+    }
+
+    /// Iterate the per-source statuses (oldest first, most recent last).
+    pub fn iter(&self) -> std::slice::Iter<'_, SourceStatus> {
+        self.sources.iter()
+    }
+}
+
+/// Format the per-source status for the canvas banner. Returns `None`
+/// when nothing noteworthy has happened (no errors, or no polls yet).
+///
+/// Rules:
+/// - All sources `Ok` (or empty) → `None`.
+/// - Exactly one source has a non-`Ok` status → "`<source>`: <message>"
+///   (with the `org/` / `repo/` prefix stripped for display).
+/// - Two or more sources have non-`Ok` status →
+///   "polling (<ok>/<total> ok)".
+/// - `AuthError` is preferred over `Error` when picking the single-error
+///   source.
+pub(crate) fn format_poll_status(status: &PollStatus) -> Option<String> {
+    if status.is_empty() {
+        return None;
+    }
+    let errored: Vec<&SourceStatus> = status
+        .iter()
+        .filter(|s| !matches!(s.kind, SourceStatusKind::Ok))
+        .collect();
+    if errored.is_empty() {
+        return None;
+    }
+    if errored.len() == 1 {
+        let s = errored[0];
+        let msg = match &s.kind {
+            SourceStatusKind::Error(m) | SourceStatusKind::AuthError(m) => m.clone(),
+            SourceStatusKind::Ok => unreachable!(),
+        };
+        return Some(format!("{}: {msg}", display_source(s.source)));
+    }
+    let total = status.len();
+    let ok = total - errored.len();
+    Some(format!("polling ({ok}/{total} ok)"))
+}
+
+/// Strip the `org/` or `repo/` prefix from a source label for display.
+fn display_source(source: &str) -> &str {
+    source
+        .strip_prefix("org/")
+        .or_else(|| source.strip_prefix("repo/"))
+        .unwrap_or(source)
 }
 
 /// Messages that drive the application.
 #[derive(Debug, Clone)]
 pub enum Message {
-    /// A poll produced new raw events.
-    Polled(Vec<RawEvent>),
-    /// A poll errored (transient).
-    PollError(String),
-    /// GitHub returned 401/403 — fatal, surface in UI.
-    AuthError(String),
+    /// A source was polled and produced these raw events. The source
+    /// label is recorded against the per-source status.
+    Polled(&'static str, Vec<RawEvent>),
+    /// A source errored (transient).
+    PollError(&'static str, String),
+    /// GitHub returned 401/403 for a source — fatal, surface in UI.
+    AuthError(&'static str, String),
     /// Cursor entered the overlay.
     HoverEntered,
     /// Cursor left the overlay.
@@ -129,7 +239,7 @@ pub fn run(settings: AppSettings) -> anyhow::Result<()> {
                 overlay: OverlayState::Active,
                 has_hovered: false,
                 hidden: false,
-                poll_status: PollStatus::Idle,
+                poll_status: PollStatus::default(),
                 last_poll_at: None,
                 program: TimelineProgram::new(),
                 window_id: None,
@@ -149,22 +259,22 @@ pub fn run(settings: AppSettings) -> anyhow::Result<()> {
 
 fn update(state: &mut State, message: Message) -> Task<Message> {
     match message {
-        Message::Polled(events) => {
+        Message::Polled(source, events) => {
             state.last_poll_at = Some(Instant::now());
-            state.poll_status = PollStatus::Polling;
+            state.poll_status.record_ok(source);
             apply_events(state, events);
             sync_program(state);
             Task::none()
         }
-        Message::PollError(e) => {
-            warn!(error = %e, "poll error");
-            state.poll_status = PollStatus::Error(e);
+        Message::PollError(source, e) => {
+            warn!(source = source, error = %e, "poll error");
+            state.poll_status.record_error(source, e);
             sync_program(state);
             Task::none()
         }
-        Message::AuthError(e) => {
-            error!(error = %e, "auth error");
-            state.poll_status = PollStatus::AuthError(e);
+        Message::AuthError(source, e) => {
+            error!(source = source, error = %e, "auth error");
+            state.poll_status.record_auth_error(source, e);
             sync_program(state);
             Task::none()
         }
@@ -332,12 +442,7 @@ fn sync_program(state: &mut State) {
     state.program.snapshot = state.snapshot.clone();
     state.program.set_anims(state.anims.clone());
     state.program.needs_setup = state.config.pat.trim().is_empty();
-    state.program.status = match &state.poll_status {
-        PollStatus::Idle => None,
-        PollStatus::Polling => None,
-        PollStatus::Error(e) => Some(format!("polling: {e}")),
-        PollStatus::AuthError(e) => Some(format!("auth failed: {e}")),
-    };
+    state.program.status = format_poll_status(&state.poll_status);
 }
 
 /// Deduplicate events by their GitHub `id`. The first occurrence wins.
@@ -378,9 +483,9 @@ fn poll_subscription() -> Subscription<Message> {
                 tokio::spawn(fut);
                 while let Some(item) = rx.recv().await {
                     let msg = match item {
-                        PollItem::Events(events) => Message::Polled(events),
-                        PollItem::Error(e) => Message::PollError(e),
-                        PollItem::AuthError(e) => Message::AuthError(e),
+                        PollItem::Events(source, events) => Message::Polled(source, events),
+                        PollItem::Error(source, e) => Message::PollError(source, e),
+                        PollItem::AuthError(source, e) => Message::AuthError(source, e),
                     };
                     if output.send(msg).await.is_err() {
                         break;
@@ -494,5 +599,109 @@ mod tests {
     fn dedupe_handles_empty() {
         let out = dedupe_events(vec![]);
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn poll_status_no_polls_yet_is_empty() {
+        let s = PollStatus::default();
+        assert!(s.is_empty());
+        assert_eq!(format_poll_status(&s), None);
+    }
+
+    #[test]
+    fn poll_status_all_ok_is_no_banner() {
+        let mut s = PollStatus::default();
+        s.record_ok("received");
+        s.record_ok("org/rust-lang");
+        assert_eq!(format_poll_status(&s), None);
+    }
+
+    #[test]
+    fn poll_status_single_error_shows_source() {
+        let mut s = PollStatus::default();
+        s.record_ok("received");
+        s.record_error("org/rust-lang", "401 Unauthorized".to_string());
+        // Single error: show the source label (with the `org/` prefix
+        // stripped) followed by the message.
+        assert_eq!(
+            format_poll_status(&s),
+            Some("rust-lang: 401 Unauthorized".to_string())
+        );
+    }
+
+    #[test]
+    fn poll_status_single_auth_error_shows_source() {
+        let mut s = PollStatus::default();
+        s.record_auth_error("repo/octocat/Hello-World", "401".to_string());
+        // `repo/` prefix is also stripped.
+        assert_eq!(
+            format_poll_status(&s),
+            Some("octocat/Hello-World: 401".to_string())
+        );
+    }
+
+    #[test]
+    fn poll_status_multiple_errors_show_counts() {
+        let mut s = PollStatus::default();
+        s.record_ok("received");
+        s.record_error("org/rust-lang", "500".to_string());
+        s.record_error("repo/octocat/Hello-World", "503".to_string());
+        // Two errored out of three → "polling (1/3 ok)".
+        assert_eq!(format_poll_status(&s), Some("polling (1/3 ok)".to_string()));
+    }
+
+    #[test]
+    fn poll_status_per_source_distinguished() {
+        // Two sources with different errors: the formatting must
+        // distinguish them so the user can tell which one failed.
+        let mut s = PollStatus::default();
+        s.record_ok("received");
+        s.record_error("org/rust-lang", "401 Unauthorized".to_string());
+        s.record_error("org/mozilla", "500 Server Error".to_string());
+        let formatted = format_poll_status(&s);
+        // With 2 errored sources we go to the counts form. To still
+        // surface the per-source error, the user can hover a single
+        // source — for that path, isolate one source and verify.
+        assert_eq!(formatted, Some("polling (1/3 ok)".to_string()));
+        // Now isolate the rust-lang source alone: confirm the per-source
+        // message is preserved verbatim.
+        let mut only_rust_lang = PollStatus::default();
+        only_rust_lang.record_error("org/rust-lang", "401 Unauthorized".to_string());
+        assert_eq!(
+            format_poll_status(&only_rust_lang),
+            Some("rust-lang: 401 Unauthorized".to_string())
+        );
+        let mut only_mozilla = PollStatus::default();
+        only_mozilla.record_error("org/mozilla", "500 Server Error".to_string());
+        assert_eq!(
+            format_poll_status(&only_mozilla),
+            Some("mozilla: 500 Server Error".to_string())
+        );
+    }
+
+    #[test]
+    fn poll_status_update_moves_to_most_recent() {
+        let mut s = PollStatus::default();
+        s.record_ok("received");
+        s.record_ok("org/rust-lang");
+        // Re-recording for `received` should move it to the back so
+        // the most-recently updated source is last in iteration order.
+        s.record_ok("received");
+        let order: Vec<&'static str> = s.iter().map(|e| e.source).collect();
+        assert_eq!(order, vec!["org/rust-lang", "received"]);
+    }
+
+    #[test]
+    fn poll_status_source_re_recording_replaces_entry() {
+        // Re-recording for the same source should not duplicate entries.
+        let mut s = PollStatus::default();
+        s.record_ok("received");
+        s.record_error("org/rust-lang", "first".to_string());
+        s.record_error("org/rust-lang", "second".to_string());
+        assert_eq!(s.len(), 2, "received + rust-lang, not 3");
+        assert_eq!(
+            format_poll_status(&s),
+            Some("rust-lang: second".to_string())
+        );
     }
 }

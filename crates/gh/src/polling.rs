@@ -46,25 +46,48 @@ pub enum PollError {
 
 /// One item emitted by the poller on its `items` channel. Lets the GUI
 /// surface transient errors and auth failures in the UI rather than only
-/// seeing successful event batches.
+/// seeing successful event batches. Each item carries a `&'static str`
+/// source label so the GUI can track per-source status (e.g. `"received"`,
+/// `"org/rust-lang"`, `"repo/octocat/Hello-World"`).
 #[derive(Debug, Clone)]
 pub enum PollItem {
-    /// A successful poll produced these events.
-    Events(Vec<RawEvent>),
+    /// A source was polled successfully and produced these events (the
+    /// vec may be empty).
+    Events(&'static str, Vec<RawEvent>),
     /// A poll failed (transient — server error, network, rate-limit). The
     /// poller keeps running; the UI can show a status line.
-    Error(String),
+    Error(&'static str, String),
     /// GitHub returned 401/403. Surfaced separately because it's terminal
     /// (the PAT is wrong or expired) and the UI should be loud about it.
-    AuthError(String),
+    AuthError(&'static str, String),
 }
 
-/// The result of a single poll cycle: events collected from sources that
-/// succeeded, and the per-source errors from sources that didn't.
+/// Per-source outcome of a single poll cycle.
 #[derive(Debug, Default)]
-pub struct PollOutcome {
+pub struct PollSourceOutcome {
+    pub source: &'static str,
     pub events: Vec<RawEvent>,
     pub errors: Vec<PollError>,
+}
+
+/// The result of a single poll cycle: per-source outcomes. A source that
+/// succeeded will have an empty `errors` vec; a source that failed will
+/// have at least one entry in `errors` and an empty `events` vec.
+#[derive(Debug, Default)]
+pub struct PollOutcome {
+    pub sources: Vec<PollSourceOutcome>,
+}
+
+impl PollOutcome {
+    /// Total events across all sources.
+    pub fn total_events(&self) -> usize {
+        self.sources.iter().map(|s| s.events.len()).sum()
+    }
+
+    /// Total errors across all sources.
+    pub fn total_errors(&self) -> usize {
+        self.sources.iter().map(|s| s.errors.len()).sum()
+    }
 }
 
 /// A handle to a running poller. The poller runs in the background; you read
@@ -92,10 +115,16 @@ impl PollerHandle {
 pub struct Poller {
     client: Client,
     cfg: PollConfig,
+    /// Interned source labels, one per source in `cfg`, in poll order
+    /// (received, then orgs, then repos). Used as the source field of
+    /// every emitted `PollItem` and `PollSourceOutcome`. The labels are
+    /// leaked at construction time; for a typical config (a handful of
+    /// strings) the memory cost is negligible.
+    sources: Vec<&'static str>,
 }
 
 impl Poller {
-    /// Build a poller. Validates auth.
+    /// Build a poller. Validates auth and interns the source labels.
     pub fn new(auth: Auth, cfg: PollConfig) -> Result<Self, PollError> {
         if cfg.username.is_none() && cfg.orgs.is_empty() && cfg.repos.is_empty() {
             return Err(PollError::Auth(
@@ -103,7 +132,12 @@ impl Poller {
             ));
         }
         let client = Client::new(auth, ClientConfig::default())?;
-        Ok(Self { client, cfg })
+        let sources = intern_sources(&cfg);
+        Ok(Self {
+            client,
+            cfg,
+            sources,
+        })
     }
 
     /// Build a poller with a custom client config (e.g. for testing).
@@ -113,7 +147,12 @@ impl Poller {
         client_cfg: ClientConfig,
     ) -> Result<Self, PollError> {
         let client = Client::new(auth, client_cfg)?;
-        Ok(Self { client, cfg })
+        let sources = intern_sources(&cfg);
+        Ok(Self {
+            client,
+            cfg,
+            sources,
+        })
     }
 
     /// Start the poller in the background. Returns a handle for stopping it
@@ -148,26 +187,38 @@ impl Poller {
         loop {
             ticker.tick().await;
             let outcome = self.poll_once().await;
-            for err in &outcome.errors {
-                let item = match err {
-                    PollError::Client(ClientError::Unauthorized(msg)) => {
-                        PollItem::AuthError(msg.clone())
+            let mut had_error = false;
+            for source in outcome.sources {
+                if !source.events.is_empty() {
+                    debug!(
+                        source = source.source,
+                        count = source.events.len(),
+                        "poll produced events"
+                    );
+                }
+                for err in &source.errors {
+                    had_error = true;
+                    let item = match err {
+                        PollError::Client(ClientError::Unauthorized(msg)) => {
+                            PollItem::AuthError(source.source, msg.clone())
+                        }
+                        _ => PollItem::Error(source.source, err.to_string()),
+                    };
+                    if tx.send(item).await.is_err() {
+                        warn!("poller receiver dropped; stopping");
+                        return;
                     }
-                    _ => PollItem::Error(err.to_string()),
-                };
-                if tx.send(item).await.is_err() {
+                }
+                if tx
+                    .send(PollItem::Events(source.source, source.events))
+                    .await
+                    .is_err()
+                {
                     warn!("poller receiver dropped; stopping");
                     return;
                 }
             }
-            if !outcome.events.is_empty() {
-                debug!(count = outcome.events.len(), "poll produced events");
-                if tx.send(PollItem::Events(outcome.events)).await.is_err() {
-                    warn!("poller receiver dropped; stopping");
-                    return;
-                }
-            }
-            if !outcome.errors.is_empty() {
+            if had_error {
                 // back off briefly so we don't spin on persistent errors
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
@@ -180,38 +231,81 @@ impl Poller {
     pub async fn poll_once(&self) -> PollOutcome {
         let mut out = PollOutcome::default();
         if let Some(user) = &self.cfg.username {
+            let source = self.sources[0];
+            let mut so = PollSourceOutcome {
+                source,
+                events: Vec::new(),
+                errors: Vec::new(),
+            };
             match self.client.received_events(user).await {
-                Ok(mut evs) => out.events.append(&mut evs),
+                Ok(mut evs) => so.events.append(&mut evs),
                 Err(e) => {
-                    warn!(error = %e, "received_events failed");
-                    out.errors.push(e.into());
+                    warn!(error = %e, source = source, "received_events failed");
+                    so.errors.push(e.into());
                 }
             }
+            out.sources.push(so);
         }
+        let mut idx = if self.cfg.username.is_some() { 1 } else { 0 };
         for org in &self.cfg.orgs {
+            let source = self.sources[idx];
+            idx += 1;
+            let mut so = PollSourceOutcome {
+                source,
+                events: Vec::new(),
+                errors: Vec::new(),
+            };
             match self.client.org_events(org).await {
-                Ok(mut evs) => out.events.append(&mut evs),
+                Ok(mut evs) => so.events.append(&mut evs),
                 Err(e) => {
-                    warn!(error = %e, org = %org, "org_events failed");
-                    out.errors.push(e.into());
+                    warn!(error = %e, source = source, "org_events failed");
+                    so.errors.push(e.into());
                 }
             }
+            out.sources.push(so);
         }
         for full in &self.cfg.repos {
             if let Some((owner, repo)) = full.split_once('/') {
+                let source = self.sources[idx];
+                idx += 1;
+                let mut so = PollSourceOutcome {
+                    source,
+                    events: Vec::new(),
+                    errors: Vec::new(),
+                };
                 match self.client.repo_events(owner, repo).await {
-                    Ok(mut evs) => out.events.append(&mut evs),
+                    Ok(mut evs) => so.events.append(&mut evs),
                     Err(e) => {
-                        warn!(error = %e, repo = %full, "repo_events failed");
-                        out.errors.push(e.into());
+                        warn!(error = %e, source = source, "repo_events failed");
+                        so.errors.push(e.into());
                     }
                 }
+                out.sources.push(so);
             } else {
                 warn!(repo = %full, "repo must be in 'owner/name' form");
             }
         }
         out
     }
+}
+
+/// Leak the source labels so they live for `'static`. The number of
+/// sources is bounded by the user's config (a handful), so the memory
+/// cost is negligible.
+fn intern_sources(cfg: &PollConfig) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    if cfg.username.is_some() {
+        out.push("received");
+    }
+    for org in &cfg.orgs {
+        let label: &'static str = Box::leak(format!("org/{org}").into_boxed_str());
+        out.push(label);
+    }
+    for repo in &cfg.repos {
+        let label: &'static str = Box::leak(format!("repo/{repo}").into_boxed_str());
+        out.push(label);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -269,8 +363,11 @@ mod tests {
         )
         .unwrap();
         let outcome = poller.poll_once().await;
-        assert_eq!(outcome.events.len(), 2, "received + orgs");
-        assert!(outcome.errors.is_empty());
+        assert_eq!(outcome.total_events(), 2, "received + orgs");
+        assert_eq!(outcome.total_errors(), 0);
+        assert_eq!(outcome.sources.len(), 2);
+        assert_eq!(outcome.sources[0].source, "received");
+        assert_eq!(outcome.sources[1].source, "org/rust-lang");
     }
 
     #[tokio::test]
@@ -297,12 +394,13 @@ mod tests {
         )
         .unwrap();
         let outcome = poller.poll_once().await;
-        assert!(outcome.events.is_empty());
-        assert_eq!(outcome.errors.len(), 1);
+        assert_eq!(outcome.total_events(), 0);
+        assert_eq!(outcome.total_errors(), 1);
         assert!(matches!(
-            outcome.errors[0],
+            outcome.sources[0].errors[0],
             PollError::Client(ClientError::Unauthorized(_))
         ));
+        assert_eq!(outcome.sources[0].source, "received");
     }
 
     #[tokio::test]
@@ -345,8 +443,18 @@ mod tests {
         )
         .unwrap();
         let outcome = poller.poll_once().await;
-        assert_eq!(outcome.events.len(), 1, "user source still works");
-        assert_eq!(outcome.errors.len(), 1, "org source failed");
+        assert_eq!(outcome.total_events(), 1, "user source still works");
+        assert_eq!(outcome.total_errors(), 1, "org source failed");
+        // Sources are reported in the order they were polled; the user
+        // source succeeded and the org source failed.
+        let user = &outcome.sources[0];
+        let org = &outcome.sources[1];
+        assert_eq!(user.source, "received");
+        assert_eq!(user.events.len(), 1);
+        assert!(user.errors.is_empty());
+        assert_eq!(org.source, "org/rust-lang");
+        assert!(org.events.is_empty());
+        assert_eq!(org.errors.len(), 1);
     }
 
     #[tokio::test]
@@ -420,8 +528,82 @@ mod tests {
             .expect("poller should produce an item within 2s")
             .expect("rx should not be closed");
         match item {
-            PollItem::Events(evs) => assert_eq!(evs.len(), 1),
+            PollItem::Events(source, evs) => {
+                assert_eq!(source, "received");
+                assert_eq!(evs.len(), 1);
+            }
             other => panic!("expected Events, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn run_emits_per_source_items() {
+        // One source succeeds, the other returns 500. The run loop should
+        // emit one Events item for the successful source and one Error
+        // item for the failing source, each tagged with the right label.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/users/octocat/received_events"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"[{
+                    "id": "1",
+                    "type": "IssuesEvent",
+                    "created_at": "2026-06-13T10:00:00Z",
+                    "repo": {"name": "x/y"},
+                    "payload": {"action": "opened", "issue": {"title": "Bug"}}
+                }]"#,
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/orgs/rust-lang/events"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let cfg = PollConfig {
+            username: Some("octocat".to_string()),
+            orgs: vec!["rust-lang".to_string()],
+            repos: vec![],
+            interval: Duration::from_millis(50),
+        };
+        let poller = Poller::with_client_config(
+            test_auth(),
+            cfg,
+            ClientConfig {
+                base_url: server.uri(),
+                user_agent: "test".to_string(),
+                timeout: Duration::from_secs(5),
+            },
+        )
+        .unwrap();
+        let (fut, mut rx) = poller.into_run();
+        let _join = tokio::spawn(fut);
+        // Collect the first cycle's items (expect: Events(received, [...]),
+        // Error(org/rust-lang, ...), Events(org/rust-lang, []) — order
+        // matches poll order).
+        let mut events_received = None;
+        let mut error_received = None;
+        let mut org_empty_events = None;
+        for _ in 0..3 {
+            let item = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .expect("poller should produce an item within 2s")
+                .expect("rx should not be closed");
+            match item {
+                PollItem::Events("received", evs) if !evs.is_empty() => {
+                    events_received = Some(evs.len());
+                }
+                PollItem::Error("org/rust-lang", _) => {
+                    error_received = Some("org/rust-lang");
+                }
+                PollItem::Events("org/rust-lang", evs) => {
+                    org_empty_events = Some(evs.is_empty());
+                }
+                other => panic!("unexpected item: {other:?}"),
+            }
+        }
+        assert_eq!(events_received, Some(1));
+        assert_eq!(error_received, Some("org/rust-lang"));
+        assert_eq!(org_empty_events, Some(true));
     }
 }

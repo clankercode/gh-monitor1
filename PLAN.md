@@ -402,6 +402,20 @@ hover-enter, `disable_mouse_passthrough`; on hover-leave, `enable_mouse_passthro
   PAT is never echoed or logged; the wizard does not make any
   network requests.
 
+## v0.3.0 (added on top of v0.2.0)
+
+- **Per-source polling status.** `PollItem` now carries a
+  `&'static str` source label (e.g. `"received"`, `"org/rust-lang"`,
+  `"repo/octocat/Hello-World"`) so the GUI can attribute events and
+  errors to a specific source. `PollStatus` in the app is no longer
+  a single `Idle | Polling | Error | AuthError` enum — it tracks a
+  per-source map keyed by source label, with most-recently-updated
+  at the back. The status banner formats errors per source:
+  `rust-lang: 401 Unauthorized` when exactly one source has erred,
+  and `polling (1/3 ok)` when more than one has. The `received`
+  source (no prefix) is shown as-is; the `org/` and `repo/` prefixes
+  are stripped for display.
+
 ## v1.1 (deferred from v1)
 
 - **Window position save-on-move.** Subscribe to
