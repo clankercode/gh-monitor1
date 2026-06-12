@@ -5,8 +5,7 @@
 //! channel that the Iced app reads from.
 //!
 //! Menu items:
-//! - "Show / Hide" — toggle the overlay window's visibility
-//! - "Quit"        — exit the app
+//! - "Quit" — exit the app
 //!
 //! On Linux, this requires GTK + libappindicator at runtime. See
 //! `PLAN.md` and `.github/workflows/ci.yml` for the install command.
@@ -21,9 +20,7 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 /// Menu actions the tray can emit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TrayAction {
-    /// Toggle the overlay window's visibility.
-    ToggleVisible,
+pub(crate) enum TrayAction {
     /// Quit the app.
     Quit,
 }
@@ -34,7 +31,7 @@ static TRAY_RX: Mutex<Option<mpsc::Receiver<TrayAction>>> = Mutex::new(None);
 
 /// Take the receiver out of the slot. Returns `None` if the tray
 /// hasn't been started or if the receiver was already taken.
-pub fn tray_rx_owned() -> Option<mpsc::Receiver<TrayAction>> {
+pub(crate) fn tray_rx_owned() -> Option<mpsc::Receiver<TrayAction>> {
     TRAY_RX.lock().ok().and_then(|mut g| g.take())
 }
 
@@ -64,32 +61,27 @@ pub fn spawn() -> Result<TrayHandle> {
 
     // Build the menu. IDs are arbitrary strings; we look them up when
     // the event fires.
-    let show_item = MenuItem::with_id("show", "Show / Hide", true, None);
     let quit_item = MenuItem::with_id("quit", "Quit", true, None);
 
     let menu = Menu::new();
-    menu.append(&show_item).context("append show")?;
     menu.append(&quit_item).context("append quit")?;
 
-    let icon = make_icon();
+    let icon = make_icon().context("building tray icon")?;
 
     // Install the global menu event handler. Must be called once
     // before any events fire.
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
         let action = match event.id().0.as_str() {
-            "show" => TrayAction::ToggleVisible,
             "quit" => TrayAction::Quit,
             _ => return,
         };
-        let tx = tx.clone();
-        // The event handler runs on a non-tokio thread; use
-        // tokio::spawn to forward. If we can't spawn (e.g. shutdown),
-        // drop the action.
-        tokio::spawn(async move {
-            if tx.send(action).await.is_err() {
-                warn!("tray event receiver dropped");
-            }
-        });
+        // The event handler runs on a non-tokio thread (muda/GTK),
+        // so we use `blocking_send` instead of `tokio::spawn`+`send`.
+        // The latter would panic under `panic = "abort"` because no
+        // tokio runtime is present on this thread.
+        if let Err(e) = tx.blocking_send(action) {
+            warn!(error = %e, "tray event receiver dropped");
+        }
     }));
 
     let tray = TrayIconBuilder::new()
@@ -109,9 +101,9 @@ pub struct TrayHandle {
 }
 
 /// Build a simple 32x32 RGBA icon: a filled rounded square in the
-/// gh-monitor brand color (deep purple), with a transparent corner
-/// pixel for visual interest.
-fn make_icon() -> Icon {
+/// gh-monitor brand color (deep purple), transparent at the four
+/// corners.
+fn make_icon() -> Result<Icon> {
     const W: u32 = 32;
     const H: u32 = 32;
     let mut rgba = vec![0u8; (W * H * 4) as usize];
@@ -136,8 +128,7 @@ fn make_icon() -> Icon {
             }
         }
     }
-    // SAFETY: we just built a valid RGBA buffer of the right size.
-    Icon::from_rgba(rgba, W, H).expect("valid rgba")
+    Icon::from_rgba(rgba, W, H).context("building tray icon from rgba buffer")
 }
 
 #[cfg(test)]
@@ -145,15 +136,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn icon_is_correct_size() {
-        // Smoke-test the icon builder. The actual pixel data isn't
-        // asserted; the GTK/libxdo runtime would be needed for a
-        // real roundtrip.
-        let _ = make_icon();
-    }
-
-    #[test]
-    fn tray_actions_distinct() {
-        assert_ne!(TrayAction::ToggleVisible, TrayAction::Quit);
+    fn icon_builds_with_expected_size() {
+        // `Icon::from_rgba` requires a buffer of exactly
+        // `width * height * 4` bytes. Smoke-test that our builder
+        // produces one. The actual pixel data isn't asserted;
+        // the GTK/libxdo runtime would be needed for a real
+        // roundtrip.
+        let icon = make_icon().expect("make_icon should succeed");
+        // Drop the icon to confirm the type is constructed.
+        let _ = icon;
     }
 }
