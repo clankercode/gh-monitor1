@@ -24,6 +24,7 @@ use crate::animation::NodeAnim;
 use crate::canvas::TimelineProgram;
 use crate::link::open_url;
 use crate::overlay::OverlayState;
+use crate::tray::TrayAction;
 
 /// The settings passed in from `main.rs` to construct the app.
 #[derive(Debug, Clone)]
@@ -83,6 +84,10 @@ pub enum Message {
     Escape,
     /// F5 pressed — refresh now.
     Refresh,
+    /// Tray menu fired an action.
+    TrayAction(TrayAction),
+    /// Toggle the overlay window's visibility.
+    ToggleVisible,
 }
 
 /// Run the application. Blocks until the window is closed.
@@ -197,6 +202,14 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         },
         Message::Escape => iced::exit(),
         Message::Refresh => Task::none(),
+        Message::TrayAction(TrayAction::Quit) => iced::exit(),
+        Message::TrayAction(TrayAction::ToggleVisible) | Message::ToggleVisible => {
+            // Toggle the window's visibility. We don't yet track a
+            // "hidden" flag, so this is a no-op placeholder — a real
+            // implementation would call `window::set_visible(id, false)`
+            // and surface a "Show" tray menu entry when hidden.
+            Task::none()
+        }
     }
 }
 
@@ -229,7 +242,8 @@ fn subscription(_state: &State) -> Subscription<Message> {
     });
     let win = window::open_events().map(Message::WindowResolved);
     let poll = poll_subscription();
-    Subscription::batch([kb, poll, win])
+    let tray = tray_subscription();
+    Subscription::batch([kb, poll, win, tray])
 }
 
 fn theme(_state: &State) -> Option<Theme> {
@@ -318,6 +332,29 @@ fn poll_subscription() -> Subscription<Message> {
                         PollItem::AuthError(e) => Message::AuthError(e),
                     };
                     if output.send(msg).await.is_err() {
+                        break;
+                    }
+                }
+            },
+        )
+    })
+}
+
+/// The tray subscription. Drains `crate::tray::tray_rx_owned()` and
+/// turns each `TrayAction` into a `Message::TrayAction`. No-op if the
+/// tray isn't started.
+fn tray_subscription() -> Subscription<Message> {
+    Subscription::run(|| {
+        iced::stream::channel(
+            4,
+            async move |mut output: iced::futures::channel::mpsc::Sender<Message>| {
+                let Some(rx) = crate::tray::tray_rx_owned() else {
+                    warn!("tray subscription: no receiver; exiting");
+                    return;
+                };
+                let mut rx = rx;
+                while let Some(action) = rx.recv().await {
+                    if output.send(Message::TrayAction(action)).await.is_err() {
                         break;
                     }
                 }
