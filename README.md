@@ -25,6 +25,8 @@ Built with Rust + Iced. One binary per platform. No Electron, no Tauri.
 - **Deep links** — click any event to open the PR/issue/release in your
   browser
 - **Single binary per platform** — no runtime, no installer needed
+- **First-time setup wizard** — `gh-monitor init` walks you through PAT
+  (input hidden on Unix), username, orgs, repos, and poll interval
 
 ## Screenshots
 
@@ -63,11 +65,17 @@ your platform, download, and run.
 Use the CLI to manage it:
 
 ```bash
+gh-monitor init               # interactive first-time setup wizard
 gh-monitor config path        # print the config file path
 gh-monitor config print       # print the loaded config as TOML
 gh-monitor config edit        # open the config file in $EDITOR
 gh-monitor config validate    # validate the config and exit
 ```
+
+The `init` subcommand walks you through setting the PAT (input is hidden on
+Unix terminals), GitHub username, watched orgs, watched repos, and poll
+interval, then writes the config to the platform's user config dir. It is
+the recommended way to set up `gh-monitor` for the first time.
 
 ### Config schema
 

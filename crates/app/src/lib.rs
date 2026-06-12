@@ -1,6 +1,6 @@
 //! The `gh-monitor` binary: an Iced-based transparent overlay.
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 #![allow(missing_docs)]
 #![allow(dead_code)]
 
@@ -11,6 +11,7 @@ pub mod config_io;
 mod link;
 mod overlay;
 mod paint;
+pub mod setup;
 pub mod tray;
 
 pub use app::{run, AppSettings};
