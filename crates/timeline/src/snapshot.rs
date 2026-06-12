@@ -39,6 +39,27 @@ pub struct TimelineNode {
     pub earliest: chrono::DateTime<chrono::Utc>,
     /// Latest event time.
     pub latest: chrono::DateTime<chrono::Utc>,
+    /// Deep-link target. Clicking the node opens this in the default
+    /// browser. Falls back to the repo page when no specific event URL
+    /// is available.
+    pub target_url: String,
+}
+
+impl TimelineNode {
+    /// Structural equality for animation diffing. The `time_label`
+    /// changes as wall-clock time passes (e.g. "59 mins ago" → "1 hr
+    /// ago") without the underlying node having changed, so the diff
+    /// must ignore it or every poll would falsely mark every node as
+    /// updated.
+    pub fn structural_eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.kind == other.kind
+            && self.repo == other.repo
+            && self.pairs == other.pairs
+            && self.earliest == other.earliest
+            && self.latest == other.latest
+            && self.target_url == other.target_url
+    }
 }
 
 /// A snapshot of the timeline at a single point in time.
@@ -73,6 +94,7 @@ impl TimelineSnapshot {
                     time_label,
                     earliest: n.earliest,
                     latest: n.latest,
+                    target_url: n.target_url,
                 }
             })
             .collect();
@@ -93,7 +115,10 @@ pub struct SnapshotDiff {
     pub removed: Vec<NodeId>,
 }
 
-/// Compute the diff from `prev` to `next`.
+/// Compute the diff from `prev` to `next`. The "updated" set ignores
+/// `time_label` so that a node whose humanized label rolls over ("59
+/// mins ago" → "1 hr ago") is not falsely marked as updated on every
+/// poll.
 pub fn diff(prev: &TimelineSnapshot, next: &TimelineSnapshot) -> SnapshotDiff {
     let prev_by_id: std::collections::HashMap<&NodeId, &TimelineNode> =
         prev.nodes.iter().map(|n| (&n.id, n)).collect();
@@ -109,7 +134,7 @@ pub fn diff(prev: &TimelineSnapshot, next: &TimelineSnapshot) -> SnapshotDiff {
     let updated: Vec<NodeId> = next_by_id
         .iter()
         .filter(|(id, n)| match prev_by_id.get(*id) {
-            Some(p) => *p != **n,
+            Some(p) => !p.structural_eq(n),
             None => false,
         })
         .map(|(id, _)| (*id).clone())
@@ -172,6 +197,7 @@ mod tests {
             time_label: "1 hr ago".to_string(),
             earliest: Utc::now(),
             latest: Utc::now(),
+            target_url: "https://github.com/x/y".to_string(),
         };
         let n2 = TimelineNode {
             id: NodeId::new("b"),
@@ -184,6 +210,7 @@ mod tests {
             time_label: "1 hr ago".to_string(),
             earliest: Utc::now(),
             latest: Utc::now(),
+            target_url: "https://github.com/x/y".to_string(),
         };
         let prev = TimelineSnapshot {
             nodes: vec![n1.clone()],
@@ -211,6 +238,7 @@ mod tests {
             time_label: "1 hr ago".to_string(),
             earliest: Utc::now(),
             latest: Utc::now(),
+            target_url: "https://github.com/x/y".to_string(),
         };
         let mut n2 = n1.clone();
         n2.pairs[0].0.count = 2;
@@ -219,6 +247,62 @@ mod tests {
         let d = diff(&prev, &next);
         assert!(d.added.is_empty());
         assert_eq!(d.updated.len(), 1);
+    }
+
+    #[test]
+    fn diff_ignores_time_label_changes() {
+        // Two snapshots with the same underlying node but a different
+        // humanized `time_label` (e.g. "59 mins ago" → "1 hr ago") must
+        // NOT register as an update.
+        let n1 = TimelineNode {
+            id: NodeId::new("a"),
+            kind: NodeKind::Group,
+            repo: "x/y".to_string(),
+            pairs: vec![(KindCount {
+                kind: EventKind::PrOpened,
+                count: 1,
+            },)],
+            time_label: "59 mins ago".to_string(),
+            earliest: Utc::now(),
+            latest: Utc::now(),
+            target_url: "https://github.com/x/y".to_string(),
+        };
+        let mut n2 = n1.clone();
+        n2.time_label = "1 hr ago".to_string();
+        let prev = TimelineSnapshot { nodes: vec![n1] };
+        let next = TimelineSnapshot { nodes: vec![n2] };
+        let d = diff(&prev, &next);
+        assert!(d.added.is_empty());
+        assert!(
+            d.updated.is_empty(),
+            "time_label alone must not trigger an update"
+        );
+        assert!(d.removed.is_empty());
+    }
+
+    #[test]
+    fn diff_detects_url_change_as_update() {
+        // A node whose `target_url` changes (e.g. a new PR replaces an
+        // old one in the same group) IS a meaningful update.
+        let n1 = TimelineNode {
+            id: NodeId::new("a"),
+            kind: NodeKind::Group,
+            repo: "x/y".to_string(),
+            pairs: vec![(KindCount {
+                kind: EventKind::PrOpened,
+                count: 1,
+            },)],
+            time_label: "1 hr ago".to_string(),
+            earliest: Utc::now(),
+            latest: Utc::now(),
+            target_url: "https://github.com/x/y/pull/1".to_string(),
+        };
+        let mut n2 = n1.clone();
+        n2.target_url = "https://github.com/x/y/pull/2".to_string();
+        let prev = TimelineSnapshot { nodes: vec![n1] };
+        let next = TimelineSnapshot { nodes: vec![n2] };
+        let d = diff(&prev, &next);
+        assert_eq!(d.updated.len(), 1, "url change must trigger an update");
     }
 
     #[test]
@@ -231,6 +315,7 @@ mod tests {
             time_label: "1 hr ago".to_string(),
             earliest: Utc::now(),
             latest: Utc::now(),
+            target_url: "https://github.com/x/y".to_string(),
         };
         let prev = TimelineSnapshot { nodes: vec![n1] };
         let next = TimelineSnapshot { nodes: vec![] };

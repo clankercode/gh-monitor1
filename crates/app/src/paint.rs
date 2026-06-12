@@ -2,6 +2,7 @@
 //! the Iced `Program` impl so we can unit-test the layout and URL logic
 //! without a display.
 
+#[allow(unused_imports)]
 use gh_monitor_timeline::{NodeKind, TimelineNode, TimelineSnapshot};
 
 /// Per-node rectangle in canvas-local coordinates.
@@ -58,10 +59,13 @@ pub fn layout(snapshot: &TimelineSnapshot, max_width: f32) -> (Vec<NodeRect>, Ca
     )
 }
 
-/// Build a deep-link URL for a node, pointing at the repo's activity page.
-/// Click handler in the canvas Program calls this.
-pub fn url_for_node(node: &TimelineNode) -> String {
-    format!("https://github.com/{}", node.repo)
+/// Build a fallback deep-link URL for a node, pointing at the repo's
+/// activity page. The canvas no longer uses this — each node carries
+/// its own `target_url` from the source event — but it's kept here as a
+/// helper for tests and other call sites that only have a repo name.
+#[allow(dead_code)]
+pub fn url_for_repo(repo: &str) -> String {
+    format!("https://github.com/{repo}")
 }
 
 /// Visual class for a node, used to pick colors.
@@ -113,6 +117,7 @@ mod tests {
             time_label: "1 hr ago".to_string(),
             earliest: Utc::now(),
             latest: Utc::now(),
+            target_url: format!("https://github.com/{repo}"),
         }
     }
 
@@ -154,9 +159,11 @@ mod tests {
     }
 
     #[test]
-    fn url_for_node_is_repo() {
-        let n = node("octocat/Hello-World", NodeKind::Group);
-        assert_eq!(url_for_node(&n), "https://github.com/octocat/Hello-World");
+    fn url_for_repo_uses_repo_name() {
+        assert_eq!(
+            url_for_repo("octocat/Hello-World"),
+            "https://github.com/octocat/Hello-World"
+        );
     }
 
     #[test]

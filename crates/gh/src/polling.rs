@@ -1,6 +1,7 @@
 //! The polling loop: repeatedly fetch events from all sources and emit them
 //! on a tokio channel.
 
+use std::future::Future;
 use std::time::Duration;
 
 use thiserror::Error;
@@ -116,13 +117,28 @@ impl Poller {
     }
 
     /// Start the poller in the background. Returns a handle for stopping it
-    /// and a receiver for items (events + per-poll errors).
+    /// and a receiver for items (events + per-poll errors). The caller must
+    /// be running on a tokio runtime (e.g. `#[tokio::test]` or Iced with the
+    /// `tokio` feature enabled).
     pub fn start(self) -> PollerHandle {
+        let (fut, items) = self.into_run();
+        let join = tokio::spawn(fut);
+        PollerHandle { join, items }
+    }
+
+    /// Decompose the poller into a future that runs the loop and a
+    /// receiver for its items, without spawning. The caller decides which
+    /// executor (if any) to spawn the future on. This is the v1 entry
+    /// point for the Iced app, which provides its own tokio runtime.
+    pub fn into_run(
+        self,
+    ) -> (
+        impl Future<Output = ()> + Send + 'static,
+        mpsc::Receiver<PollItem>,
+    ) {
         let (tx, rx) = mpsc::channel::<PollItem>(8);
-        let join = tokio::spawn(async move {
-            self.run(tx).await;
-        });
-        PollerHandle { join, items: rx }
+        let fut = self.run(tx);
+        (fut, rx)
     }
 
     async fn run(self, tx: mpsc::Sender<PollItem>) {
@@ -360,5 +376,52 @@ mod tests {
         // let it tick a few times
         tokio::time::sleep(Duration::from_millis(150)).await;
         h.stop();
+    }
+
+    #[tokio::test]
+    async fn into_run_yields_receiver_and_runs() {
+        // The Iced app uses `into_run` to get a future + receiver
+        // without `Poller::start` doing the spawn for it. Verify that
+        // spawning the future ourselves still produces items.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"[{
+                    "id": "1",
+                    "type": "IssuesEvent",
+                    "created_at": "2026-06-13T10:00:00Z",
+                    "repo": {"name": "x/y"},
+                    "payload": {"action": "opened", "issue": {"title": "Bug"}}
+                }]"#,
+            ))
+            .mount(&server)
+            .await;
+        let cfg = PollConfig {
+            username: Some("octocat".to_string()),
+            orgs: vec![],
+            repos: vec![],
+            interval: Duration::from_millis(50),
+        };
+        let poller = Poller::with_client_config(
+            test_auth(),
+            cfg,
+            ClientConfig {
+                base_url: server.uri(),
+                user_agent: "test".to_string(),
+                timeout: Duration::from_secs(5),
+            },
+        )
+        .unwrap();
+        let (fut, mut rx) = poller.into_run();
+        let _join = tokio::spawn(fut);
+        // Wait for at least one item.
+        let item = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("poller should produce an item within 2s")
+            .expect("rx should not be closed");
+        match item {
+            PollItem::Events(evs) => assert_eq!(evs.len(), 1),
+            other => panic!("expected Events, got {other:?}"),
+        }
     }
 }

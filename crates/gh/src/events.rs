@@ -124,7 +124,7 @@ pub fn parse_event(value: serde_json::Value) -> Result<RawEvent, ParseError> {
 
     let payload = value.get("payload");
 
-    let (kind, title) = match event_type {
+    let (kind, title, url) = match event_type {
         "PullRequestEvent" => {
             let action = payload
                 .and_then(|p| p.get("action"))
@@ -135,8 +135,13 @@ pub fn parse_event(value: serde_json::Value) -> Result<RawEvent, ParseError> {
                 .and_then(|pr| pr.get("title"))
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
+            let url = payload
+                .and_then(|p| p.get("pull_request"))
+                .and_then(|pr| pr.get("html_url"))
+                .and_then(|v| v.as_str())
+                .and_then(|s| url::Url::parse(s).ok());
             match action {
-                "opened" => (EventKind::PrOpened, title),
+                "opened" => (EventKind::PrOpened, title, url),
                 "closed" => {
                     let merged = payload
                         .and_then(|p| p.get("pull_request"))
@@ -144,7 +149,7 @@ pub fn parse_event(value: serde_json::Value) -> Result<RawEvent, ParseError> {
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false);
                     if merged {
-                        (EventKind::PrMerged, title)
+                        (EventKind::PrMerged, title, url)
                     } else {
                         return Err(ParseError::UnsupportedAction(format!(
                             "PullRequestEvent:{}",
@@ -170,13 +175,18 @@ pub fn parse_event(value: serde_json::Value) -> Result<RawEvent, ParseError> {
                 .and_then(|i| i.get("title"))
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
+            let url = payload
+                .and_then(|p| p.get("issue"))
+                .and_then(|i| i.get("html_url"))
+                .and_then(|v| v.as_str())
+                .and_then(|s| url::Url::parse(s).ok());
             if action != "opened" {
                 return Err(ParseError::UnsupportedAction(format!(
                     "IssuesEvent:{}",
                     action
                 )));
             }
-            (EventKind::IssueOpened, title)
+            (EventKind::IssueOpened, title, url)
         }
         "ReleaseEvent" => {
             let action = payload
@@ -194,13 +204,18 @@ pub fn parse_event(value: serde_json::Value) -> Result<RawEvent, ParseError> {
                         .and_then(|v| v.as_str())
                 })
                 .map(|s| s.to_string());
+            let url = payload
+                .and_then(|p| p.get("release"))
+                .and_then(|r| r.get("html_url"))
+                .and_then(|v| v.as_str())
+                .and_then(|s| url::Url::parse(s).ok());
             if action != "published" {
                 return Err(ParseError::UnsupportedAction(format!(
                     "ReleaseEvent:{}",
                     action
                 )));
             }
-            (EventKind::ReleasePublished, title)
+            (EventKind::ReleasePublished, title, url)
         }
         "CreateEvent" => {
             // CreateEvent: ref_type is "repository" when a new repo is created
@@ -214,7 +229,10 @@ pub fn parse_event(value: serde_json::Value) -> Result<RawEvent, ParseError> {
                     ref_type
                 )));
             }
-            (EventKind::RepoCreated, None)
+            // No specific URL in the payload for repo-created events;
+            // use the repo page. The caller can still pass a richer URL
+            // by constructing the RawEvent directly.
+            (EventKind::RepoCreated, None, None)
         }
         other => {
             return Err(ParseError::UnsupportedEvent(other.to_string()));
@@ -227,7 +245,7 @@ pub fn parse_event(value: serde_json::Value) -> Result<RawEvent, ParseError> {
         repo_full_name,
         created_at,
         title,
-        url: None,
+        url,
     })
 }
 
@@ -257,13 +275,21 @@ mod tests {
             "repo": {"name": "octocat/Hello-World"},
             "payload": {
                 "action": "opened",
-                "pull_request": {"title": "Fix typo", "merged": false}
+                "pull_request": {
+                    "title": "Fix typo",
+                    "merged": false,
+                    "html_url": "https://github.com/octocat/Hello-World/pull/42"
+                }
             }
         }"#;
         let ev = parse_event(serde_json::from_str(json).unwrap()).unwrap();
         assert_eq!(ev.kind, EventKind::PrOpened);
         assert_eq!(ev.repo_full_name, "octocat/Hello-World");
         assert_eq!(ev.title.as_deref(), Some("Fix typo"));
+        assert_eq!(
+            ev.url.as_ref().map(|u| u.to_string()),
+            Some("https://github.com/octocat/Hello-World/pull/42".to_string())
+        );
     }
 
     #[test]
@@ -306,11 +332,18 @@ mod tests {
             "repo": {"name": "x/y"},
             "payload": {
                 "action": "opened",
-                "issue": {"title": "Bug"}
+                "issue": {
+                    "title": "Bug",
+                    "html_url": "https://github.com/x/y/issues/7"
+                }
             }
         }"#;
         let ev = parse_event(serde_json::from_str(json).unwrap()).unwrap();
         assert_eq!(ev.kind, EventKind::IssueOpened);
+        assert_eq!(
+            ev.url.as_ref().map(|u| u.to_string()),
+            Some("https://github.com/x/y/issues/7".to_string())
+        );
     }
 
     #[test]
@@ -322,11 +355,19 @@ mod tests {
             "repo": {"name": "x/y"},
             "payload": {
                 "action": "published",
-                "release": {"name": "v1.0", "tag_name": "v1.0"}
+                "release": {
+                    "name": "v1.0",
+                    "tag_name": "v1.0",
+                    "html_url": "https://github.com/x/y/releases/tag/v1.0"
+                }
             }
         }"#;
         let ev = parse_event(serde_json::from_str(json).unwrap()).unwrap();
         assert_eq!(ev.kind, EventKind::ReleasePublished);
+        assert_eq!(
+            ev.url.as_ref().map(|u| u.to_string()),
+            Some("https://github.com/x/y/releases/tag/v1.0".to_string())
+        );
     }
 
     #[test]

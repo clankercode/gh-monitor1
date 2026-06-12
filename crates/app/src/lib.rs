@@ -7,7 +7,7 @@
 mod animation;
 mod app;
 mod canvas;
-mod config_io;
+pub mod config_io;
 mod link;
 mod overlay;
 mod paint;

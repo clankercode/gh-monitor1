@@ -55,6 +55,12 @@ pub struct CompressedNode {
     /// If true, this is a rare/important event that should not be
     /// compressed (e.g. new repo created).
     pub standalone: bool,
+    /// Deep-link target. For grouped nodes, the URL of the most recent
+    /// event in the chunk (so clicking jumps to "the latest thing" in
+    /// that group). For standalone nodes, the URL of the single event.
+    /// Always set when a URL is available; falls back to the repo page
+    /// otherwise.
+    pub target_url: String,
 }
 
 impl CompressedNode {
@@ -138,6 +144,11 @@ fn standalone_node(ev: &RawEvent) -> CompressedNode {
             count: 1,
         }],
         standalone: true,
+        target_url: ev
+            .url
+            .as_ref()
+            .map(|u| u.to_string())
+            .unwrap_or_else(|| fallback_repo_url(&ev.repo_full_name())),
     }
 }
 
@@ -168,6 +179,14 @@ fn compress_chunk(repo: &str, chunk: &[&RawEvent]) -> CompressedNode {
         kinds.join("|")
     );
 
+    // The chunk is sorted oldest-first by `compress` before this is
+    // called, so the most recent event is the last one. Use its URL as
+    // the node's deep link.
+    let target_url = chunk
+        .last()
+        .and_then(|ev| ev.url.as_ref().map(|u| u.to_string()))
+        .unwrap_or_else(|| fallback_repo_url(repo));
+
     CompressedNode {
         id,
         repo: repo.to_string(),
@@ -175,7 +194,14 @@ fn compress_chunk(repo: &str, chunk: &[&RawEvent]) -> CompressedNode {
         latest,
         pairs,
         standalone: false,
+        target_url,
     }
+}
+
+/// The default deep-link for a node when no specific event URL is
+/// available: the repo's activity page.
+fn fallback_repo_url(repo: &str) -> String {
+    format!("https://github.com/{repo}")
 }
 
 #[cfg(test)]

@@ -384,6 +384,19 @@ hover-enter, `disable_mouse_passthrough`; on hover-leave, `enable_mouse_passthro
       shows a real GitHub timeline with at least one node from a real
       polled account
 - [ ] Click on a node opens the URL in the default browser
-- [ ] App position persists across restarts
+- [ ] ~~App position persists across restarts~~ — v1 limitation: the
+      `window_position` field is read on launch but not written back
+      when the user drags the overlay. Restoring from config is fine;
+      saving requires subscribing to `iced::window::events()` for
+      `WindowEvent::Moved` and is deferred to v1.1.
 - [ ] CI green on all three platforms
 - [ ] Tagged release produces downloadable artifacts on GitHub
+
+## v1.1 (deferred from v1)
+
+- **Window position save-on-move.** Subscribe to
+  `iced::window::events()` for `WindowEvent::Moved` and write the new
+  position back to `Config`. v1 only restores; it doesn't save.
+- **Tray / settings UI.** A clickable tray icon to open a settings
+  panel (repo/org list, PAT input). v1 ships with config-from-file +
+  env vars only.

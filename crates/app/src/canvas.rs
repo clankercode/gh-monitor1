@@ -10,7 +10,7 @@ use iced::{Color, Event, Point, Rectangle, Size, Vector};
 
 use crate::animation::NodeAnim;
 use crate::app::Message;
-use crate::paint::{layout, url_for_node, NodeClass, NodeRect};
+use crate::paint::{layout, NodeClass, NodeRect};
 use gh_monitor_timeline::{NodeId, TimelineNode, TimelineSnapshot};
 
 /// The canvas program. Holds the current snapshot, the per-node animation
@@ -121,8 +121,10 @@ impl Program<Message, iced::Theme, iced::Renderer> for TimelineProgram {
                 for rect in &rects {
                     if rect.contains(p) {
                         let node = &self.snapshot.nodes[rect.index];
-                        let url = url_for_node(node);
-                        return Some(Action::publish(Message::OpenUrl(url)).and_capture());
+                        return Some(
+                            Action::publish(Message::OpenUrl(node.target_url.clone()))
+                                .and_capture(),
+                        );
                     }
                 }
             }
