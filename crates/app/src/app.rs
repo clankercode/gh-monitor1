@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use gh_monitor_config::schema::WindowPosition;
 use gh_monitor_config::Config;
 use gh_monitor_gh::{Auth, PollConfig, PollItem, Poller, RawEvent};
 use gh_monitor_timeline::snapshot::SnapshotDiff;
@@ -79,6 +80,8 @@ pub enum Message {
     OpenUrl(String),
     /// Window id resolved (or moved).
     WindowResolved(Id),
+    /// Window was moved by the user.
+    WindowMoved(iced::Point),
     /// User pressed on a non-clickable area of the pane — start dragging
     /// the window.
     DragWindow,
@@ -200,6 +203,24 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             // `HoverLeft` after the user hovers will switch to passthrough.
             window::disable_mouse_passthrough(id)
         }
+        Message::WindowMoved(p) => {
+            // Persist the new position to the config. We update the
+            // in-memory config and write to disk; this is called on
+            // every move so we keep a small per-move write cost.
+            state.config.window_position = Some(WindowPosition {
+                x: p.x as i32,
+                y: p.y as i32,
+            });
+            let cfg = state.config.clone();
+            // Spawn a write task so we don't block the UI on disk I/O.
+            iced::Task::future(async move {
+                if let Err(e) = crate::config_io::save_config(&cfg) {
+                    warn!(error = %e, "failed to persist window position");
+                }
+                Message::Refresh // dummy message
+            })
+            .discard()
+        }
         Message::DragWindow => match state.window_id {
             Some(id) => window::drag(id),
             None => Task::none(),
@@ -251,9 +272,16 @@ fn subscription(_state: &State) -> Subscription<Message> {
         None
     });
     let win = window::open_events().map(Message::WindowResolved);
+    let move_sub = window::events().filter_map(|(_id, ev)| {
+        if let iced::window::Event::Moved(p) = ev {
+            Some(Message::WindowMoved(p))
+        } else {
+            None
+        }
+    });
     let poll = poll_subscription();
     let tray = tray_subscription();
-    Subscription::batch([kb, poll, win, tray])
+    Subscription::batch([kb, poll, win, move_sub, tray])
 }
 
 fn theme(_state: &State) -> Option<Theme> {
