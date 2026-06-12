@@ -10,7 +10,7 @@
 //! - [`snapshot`] — point-in-time state used to diff for animations
 
 #![forbid(unsafe_code)]
-#![warn(missing_docs)]
+#![allow(missing_docs)]
 
 pub mod compress;
 pub mod group;

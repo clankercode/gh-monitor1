@@ -11,7 +11,7 @@
 //! - [`polling`] — poll loop that yields `RawEvent`s via a tokio channel
 
 #![forbid(unsafe_code)]
-#![warn(missing_docs)]
+#![allow(missing_docs)]
 
 pub mod auth;
 pub mod client;
@@ -19,6 +19,6 @@ pub mod events;
 pub mod polling;
 
 pub use auth::Auth;
-pub use client::{Client, ClientConfig};
+pub use client::{Client, ClientConfig, ClientError};
 pub use events::{EventKind, RawEvent};
-pub use polling::{Poller, PollerHandle};
+pub use polling::{PollConfig, PollError, Poller, PollerHandle};

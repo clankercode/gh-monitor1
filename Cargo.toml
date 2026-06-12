@@ -48,7 +48,7 @@ dirs = "5"
 toml = "0.8"
 
 # GUI
-iced = { version = "0.14", features = ["wgpu", "tokio", "markdown", "svg", "image"] }
+iced = { version = "0.14", features = ["wgpu", "tokio", "markdown", "svg", "image", "canvas", "debug"] }
 tray-icon = "0.21"
 
 # Test-only

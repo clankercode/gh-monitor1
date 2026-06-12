@@ -31,7 +31,9 @@ fn default_poll_interval() -> u64 {
 /// A window position (top-left, in physical pixels).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WindowPosition {
+    /// X coordinate in physical pixels.
     pub x: i32,
+    /// Y coordinate in physical pixels.
     pub y: i32,
 }
 
