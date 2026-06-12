@@ -1,0 +1,24 @@
+[package]
+name = "gh-monitor-gh"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "GitHub REST API client + polling for gh-monitor"
+
+[dependencies]
+tokio.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+url.workspace = true
+dirs.workspace = true
+
+[dev-dependencies]
+wiremock.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+insta.workspace = true
+proptest.workspace = true

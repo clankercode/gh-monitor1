@@ -1,0 +1,19 @@
+[package]
+name = "gh-monitor-timeline"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Timeline grouping, compression, and humanization for gh-monitor"
+
+[dependencies]
+gh-monitor-gh.workspace = true
+serde.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+proptest.workspace = true

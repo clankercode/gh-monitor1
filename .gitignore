@@ -1,0 +1,14 @@
+target/
+.worktrees/
+.idea/
+.vscode/
+*.iml
+.DS_Store
+.env
+.env.local
+*.log
+reviews/
+.notes/
+out/
+dist/
+/Cargo.lock.bak
