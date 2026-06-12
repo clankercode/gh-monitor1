@@ -1603,6 +1603,7 @@ dependencies = [
  "gtk",
  "iced",
  "insta",
+ "libc",
  "open",
  "proptest",
  "serde",

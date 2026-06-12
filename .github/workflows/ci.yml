@@ -62,6 +62,39 @@ jobs:
       - name: Run tests
         run: cargo test --workspace --all-features
 
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "."
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - name: Generate coverage report
+        run: cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
+      - name: Upload LCOV artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lcov
+          path: lcov.info
+          if-no-files-found: error
+      - name: Upload to Coveralls
+        if: env.COVERALLS_REPO_TOKEN != null
+        uses: coverallsapp/github-action@v2
+        with:
+          file: lcov.info
+          flag_name: rust-ubuntu
+          parallel: false
+        env:
+          COVERALLS_REPO_TOKEN: ${{ secrets.COVERALLS_REPO_TOKEN }}
+
   build:
     name: Build release (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

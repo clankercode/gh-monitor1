@@ -192,10 +192,10 @@ fn draw_background(frame: &mut Frame, bounds: Rectangle) {
     );
 }
 
-/// Draw the "empty" state in the middle of the canvas. Shown when the
-/// timeline has no nodes to display.
-fn draw_empty_state(frame: &mut Frame, bounds: Rectangle, status: Option<&str>, needs_setup: bool) {
-    let lines: Vec<String> = if needs_setup {
+/// Decide which lines to display in the empty state, based on whether
+/// the user still needs to configure a token and on any active status.
+pub(crate) fn empty_state_lines(needs_setup: bool, status: Option<&str>) -> Vec<String> {
+    if needs_setup {
         vec![
             "gh-monitor".to_string(),
             String::new(),
@@ -208,7 +208,20 @@ fn draw_empty_state(frame: &mut Frame, bounds: Rectangle, status: Option<&str>, 
         vec![s.to_string()]
     } else {
         vec!["No recent activity".to_string()]
-    };
+    }
+}
+
+/// Decide what text to show in the status banner. Currently an identity
+/// function; exists so we can add truncation or other transforms later
+/// without touching the draw code.
+pub(crate) fn status_banner_text(text: &str) -> &str {
+    text
+}
+
+/// Draw the "empty" state in the middle of the canvas. Shown when the
+/// timeline has no nodes to display.
+fn draw_empty_state(frame: &mut Frame, bounds: Rectangle, status: Option<&str>, needs_setup: bool) {
+    let lines = empty_state_lines(needs_setup, status);
     let mut y = bounds.height / 2.0 - (lines.len() as f32 * 18.0) / 2.0;
     for line in lines {
         frame.fill_text(canvas::Text {
@@ -246,8 +259,9 @@ fn draw_status_banner(frame: &mut Frame, bounds: Rectangle, text: &str) {
             a: 0.45,
         },
     );
+    let banner_text = status_banner_text(text);
     frame.fill_text(canvas::Text {
-        content: text.to_string(),
+        content: banner_text.to_string(),
         position: Point::new(16.0, 14.0),
         max_width: bounds.width - 32.0,
         color: Color {
@@ -396,4 +410,37 @@ fn draw_node(
 
     // Suppress unused warning for Vector.
     let _ = Vector::new(0.0, 0.0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_state_lines_setup_when_needs_setup() {
+        let lines = empty_state_lines(true, None);
+        assert_eq!(
+            lines,
+            vec![
+                "gh-monitor".to_string(),
+                String::new(),
+                "No personal access token set.".to_string(),
+                "Run one of:".to_string(),
+                "  gh-monitor config edit".to_string(),
+                "  GH_MONITOR_PAT=ghp_... gh-monitor".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_state_lines_status_when_status_set() {
+        let lines = empty_state_lines(false, Some("auth failed"));
+        assert_eq!(lines, vec!["auth failed".to_string()]);
+    }
+
+    #[test]
+    fn empty_state_lines_default_when_no_status_no_setup() {
+        let lines = empty_state_lines(false, None);
+        assert_eq!(lines, vec!["No recent activity".to_string()]);
+    }
 }

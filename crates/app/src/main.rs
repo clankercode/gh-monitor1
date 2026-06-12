@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use tracing::info;
 
 use gh_monitor_app::config_io::{config_path, ensure_template, load_config};
+use gh_monitor_app::setup;
 use gh_monitor_app::tray;
 use gh_monitor_app::{run, AppSettings};
 
@@ -44,6 +45,7 @@ fn main() -> Result<()> {
 
 fn handle_cli(args: &[String]) -> Result<()> {
     match args[0].as_str() {
+        "init" => setup::run().context("running setup wizard"),
         "config" => handle_config(&args[1..]),
         "--version" | "-V" => {
             println!("gh-monitor {}", env!("CARGO_PKG_VERSION"));
@@ -127,6 +129,7 @@ fn print_help() -> Result<()> {
              gh-monitor [COMMAND]\n\
          \n\
          COMMANDS:\n  \
+             init                  Interactive first-time setup wizard\n  \
              config path           Print the config file path\n  \
              config print          Print the loaded config as TOML\n  \
              config edit           Open the config file in $EDITOR\n  \

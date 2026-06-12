@@ -392,6 +392,16 @@ hover-enter, `disable_mouse_passthrough`; on hover-leave, `enable_mouse_passthro
 - [ ] CI green on all three platforms
 - [ ] Tagged release produces downloadable artifacts on GitHub
 
+## v0.2.0 (added on top of v1)
+
+- **Interactive setup wizard.** `gh-monitor init` walks the user
+  through configuring their PAT (input hidden on Unix terminals via
+  termios, with a warning when falling back to plain stdin), GitHub
+  username, watched orgs, watched repos, and poll interval, then
+  writes the validated config to the platform's user config dir.
+  PAT is never echoed or logged; the wizard does not make any
+  network requests.
+
 ## v1.1 (deferred from v1)
 
 - **Window position save-on-move.** Subscribe to
@@ -400,3 +410,4 @@ hover-enter, `disable_mouse_passthrough`; on hover-leave, `enable_mouse_passthro
 - **Tray / settings UI.** A clickable tray icon to open a settings
   panel (repo/org list, PAT input). v1 ships with config-from-file +
   env vars only.
+- ~~**Interactive setup wizard.**~~ Shipped in v0.2.0 — see above.

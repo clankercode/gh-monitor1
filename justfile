@@ -85,6 +85,17 @@ ci: fmt lint test build-release
 docs:
     cargo doc --workspace --no-deps
 
+# === Coverage ===
+
+# Generate an HTML coverage report (requires cargo-llvm-cov)
+coverage:
+    cargo llvm-cov --workspace --all-features --html
+    @echo "Open target/llvm-cov/html/index.html"
+
+# Generate an LCOV coverage report (for CI / external uploaders)
+coverage-lcov:
+    cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
+
 # === Install / Release ===
 
 # Install locally

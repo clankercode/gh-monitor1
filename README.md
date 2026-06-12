@@ -25,6 +25,8 @@ Built with Rust + Iced. One binary per platform. No Electron, no Tauri.
 - **Deep links** — click any event to open the PR/issue/release in your
   browser
 - **Single binary per platform** — no runtime, no installer needed
+- **First-time setup wizard** — `gh-monitor init` walks you through PAT
+  (input hidden on Unix), username, orgs, repos, and poll interval
 
 ## Screenshots
 
@@ -63,11 +65,17 @@ your platform, download, and run.
 Use the CLI to manage it:
 
 ```bash
+gh-monitor init               # interactive first-time setup wizard
 gh-monitor config path        # print the config file path
 gh-monitor config print       # print the loaded config as TOML
 gh-monitor config edit        # open the config file in $EDITOR
 gh-monitor config validate    # validate the config and exit
 ```
+
+The `init` subcommand walks you through setting the PAT (input is hidden on
+Unix terminals), GitHub username, watched orgs, watched repos, and poll
+interval, then writes the config to the platform's user config dir. It is
+the recommended way to set up `gh-monitor` for the first time.
 
 ### Config schema
 
@@ -114,8 +122,41 @@ responsibilities and data flow. The TL;DR:
 just                # list available tasks
 just ci             # run fmt + lint + test + build-release (what CI runs)
 just test-review    # review insta snapshots
+just coverage       # generate an HTML coverage report (needs cargo-llvm-cov)
+just coverage-lcov  # generate lcov.info (used by CI)
 just bloat          # see what's bloating the release binary
 ```
+
+### Coverage
+
+Code coverage is produced with [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov)
+in the `coverage` CI job (Linux only — LLVM coverage is Linux-friendly). The
+job writes `lcov.info`, uploads it as a build artifact, and optionally pushes
+it to Coveralls when the `COVERALLS_REPO_TOKEN` secret is set. Coverage is
+**informational only** — it is not a CI gate.
+
+Install `cargo-llvm-cov` locally with:
+
+```bash
+cargo install cargo-llvm-cov --locked
+rustup component add llvm-tools-preview
+```
+
+#### Current baseline
+
+The pure-logic crates carry the test load — `gh-monitor-gh` and
+`gh-monitor-timeline` are at ~90-100% line coverage — while the Iced GUI
+crate (`gh-monitor-app`) is intentionally light on tests at this stage
+(it needs an offscreen render target to test the canvas). Workspace-wide
+baseline (line coverage, `just coverage-lcov` on a clean tree):
+
+| Crate                | Lines | Coverage |
+| -------------------- | -----:| --------:|
+| `gh-monitor-config`  |    69 |    92.8% |
+| `gh-monitor-gh`      |   801 |    90.0% |
+| `gh-monitor-timeline`|   718 |    93.6% |
+| `gh-monitor-app`     |   998 |    20.9% |
+| **TOTAL**            | **2586** | **64.4%** |
 
 The project follows the conventions in [`AGENTS.md`](AGENTS.md).
 

@@ -12,3 +12,4 @@ reviews/
 out/
 dist/
 /Cargo.lock.bak
+/lcov.info
