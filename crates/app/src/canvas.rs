@@ -20,6 +20,11 @@ pub struct TimelineProgram {
     pub snapshot: TimelineSnapshot,
     pub anims: HashMap<NodeId, NodeAnim>,
     pub window_id: Option<iced::window::Id>,
+    /// Optional status banner rendered in the centre of the canvas.
+    pub status: Option<String>,
+    /// Whether the user has no PAT configured. The status banner will
+    /// include setup instructions in that case.
+    pub needs_setup: bool,
 }
 
 impl Default for TimelineProgram {
@@ -34,6 +39,8 @@ impl TimelineProgram {
             snapshot: TimelineSnapshot::default(),
             anims: HashMap::new(),
             window_id: None,
+            status: None,
+            needs_setup: false,
         }
     }
 
@@ -101,6 +108,13 @@ impl Program<Message, iced::Theme, iced::Renderer> for TimelineProgram {
                 hovering,
                 NodeClass::from_node_kind(node.kind),
             );
+        }
+
+        // Status banner overlay (drawn on top of the timeline).
+        if self.snapshot.nodes.is_empty() {
+            draw_empty_state(&mut frame, bounds, self.status.as_deref(), self.needs_setup);
+        } else if let Some(s) = &self.status {
+            draw_status_banner(&mut frame, bounds, s);
         }
 
         vec![frame.into_geometry()]
@@ -176,6 +190,75 @@ fn draw_background(frame: &mut Frame, bounds: Rectangle) {
             })
             .with_width(1.0),
     );
+}
+
+/// Draw the "empty" state in the middle of the canvas. Shown when the
+/// timeline has no nodes to display.
+fn draw_empty_state(frame: &mut Frame, bounds: Rectangle, status: Option<&str>, needs_setup: bool) {
+    let lines: Vec<String> = if needs_setup {
+        vec![
+            "gh-monitor".to_string(),
+            String::new(),
+            "No personal access token set.".to_string(),
+            "Run one of:".to_string(),
+            "  gh-monitor config edit".to_string(),
+            "  GH_MONITOR_PAT=ghp_... gh-monitor".to_string(),
+        ]
+    } else if let Some(s) = status {
+        vec![s.to_string()]
+    } else {
+        vec!["No recent activity".to_string()]
+    };
+    let mut y = bounds.height / 2.0 - (lines.len() as f32 * 18.0) / 2.0;
+    for line in lines {
+        frame.fill_text(canvas::Text {
+            content: line,
+            position: Point::new(20.0, y),
+            max_width: bounds.width - 40.0,
+            color: Color {
+                r: 0.85,
+                g: 0.85,
+                b: 0.9,
+                a: 0.92,
+            },
+            size: 13.0.into(),
+            ..canvas::Text::default()
+        });
+        y += 18.0;
+    }
+}
+
+/// Draw a transient status banner at the top of the canvas (e.g. an
+/// error message).
+fn draw_status_banner(frame: &mut Frame, bounds: Rectangle, text: &str) {
+    let banner_height = 32.0;
+    let bg = Path::rounded_rectangle(
+        Point::new(8.0, 4.0),
+        Size::new(bounds.width - 16.0, banner_height),
+        border::Radius::new(6.0),
+    );
+    frame.fill(
+        &bg,
+        Color {
+            r: 0.7,
+            g: 0.2,
+            b: 0.2,
+            a: 0.45,
+        },
+    );
+    frame.fill_text(canvas::Text {
+        content: text.to_string(),
+        position: Point::new(16.0, 14.0),
+        max_width: bounds.width - 32.0,
+        color: Color {
+            r: 1.0,
+            g: 1.0,
+            b: 1.0,
+            a: 0.95,
+        },
+        size: 12.0.into(),
+        ..canvas::Text::default()
+    });
 }
 
 fn draw_node(

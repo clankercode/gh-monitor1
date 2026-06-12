@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use gh_monitor_config::schema::WindowPosition;
 use gh_monitor_config::Config;
 use gh_monitor_gh::{Auth, PollConfig, PollItem, Poller, RawEvent};
 use gh_monitor_timeline::snapshot::SnapshotDiff;
@@ -16,7 +17,7 @@ use iced::event::{self, Status as EventStatus};
 use iced::futures::SinkExt;
 use iced::keyboard::{self, key, Key};
 use iced::widget::canvas::Canvas;
-use iced::window::{self, Id, Level, Settings as WindowSettings};
+use iced::window::{self, Id, Level, Mode, Settings as WindowSettings};
 use iced::{Element, Event, Size, Subscription, Task, Theme};
 use tracing::{error, warn};
 
@@ -46,6 +47,8 @@ pub struct State {
     /// cursor leaves after a hover, we transition to `Idle` and stay in
     /// the normal hover-driven passthrough mode thereafter.
     pub has_hovered: bool,
+    /// Whether the window is currently hidden via `Mode::Hidden`.
+    pub hidden: bool,
     pub poll_status: PollStatus,
     pub last_poll_at: Option<Instant>,
     pub program: TimelineProgram,
@@ -77,6 +80,8 @@ pub enum Message {
     OpenUrl(String),
     /// Window id resolved (or moved).
     WindowResolved(Id),
+    /// Window was moved by the user.
+    WindowMoved(iced::Point),
     /// User pressed on a non-clickable area of the pane — start dragging
     /// the window.
     DragWindow,
@@ -86,8 +91,6 @@ pub enum Message {
     Refresh,
     /// Tray menu fired an action.
     TrayAction(TrayAction),
-    /// Toggle the overlay window's visibility.
-    ToggleVisible,
 }
 
 /// Run the application. Blocks until the window is closed.
@@ -125,6 +128,7 @@ pub fn run(settings: AppSettings) -> anyhow::Result<()> {
                 anims: HashMap::new(),
                 overlay: OverlayState::Active,
                 has_hovered: false,
+                hidden: false,
                 poll_status: PollStatus::Idle,
                 last_poll_at: None,
                 program: TimelineProgram::new(),
@@ -149,18 +153,19 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             state.last_poll_at = Some(Instant::now());
             state.poll_status = PollStatus::Polling;
             apply_events(state, events);
-            state.program.snapshot = state.snapshot.clone();
-            state.program.set_anims(state.anims.clone());
+            sync_program(state);
             Task::none()
         }
         Message::PollError(e) => {
             warn!(error = %e, "poll error");
             state.poll_status = PollStatus::Error(e);
+            sync_program(state);
             Task::none()
         }
         Message::AuthError(e) => {
             error!(error = %e, "auth error");
             state.poll_status = PollStatus::AuthError(e);
+            sync_program(state);
             Task::none()
         }
         Message::HoverEntered => {
@@ -196,6 +201,25 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             // `HoverLeft` after the user hovers will switch to passthrough.
             window::disable_mouse_passthrough(id)
         }
+        Message::WindowMoved(p) => {
+            // Persist the new position to the config. We update the
+            // in-memory config and write to disk. Writes happen on
+            // every move event (the config is small — ~100 bytes —
+            // and the OS will coalesce), so the user gets
+            // position-persisted-on-quit semantics with no extra
+            // plumbing.
+            state.config.window_position = Some(WindowPosition {
+                x: p.x as i32,
+                y: p.y as i32,
+            });
+            let cfg = state.config.clone();
+            iced::Task::future(async move {
+                if let Err(e) = crate::config_io::save_config(&cfg) {
+                    warn!(error = %e, "failed to persist window position");
+                }
+            })
+            .discard()
+        }
         Message::DragWindow => match state.window_id {
             Some(id) => window::drag(id),
             None => Task::none(),
@@ -203,12 +227,18 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::Escape => iced::exit(),
         Message::Refresh => Task::none(),
         Message::TrayAction(TrayAction::Quit) => iced::exit(),
-        Message::ToggleVisible => {
-            // v0.1: no-op. The tray menu doesn't ship a "Show / Hide"
-            // item yet, and we don't yet track a hidden flag. A real
-            // implementation would call `window::set_visible(id, false)`
-            // and surface a "Show" tray menu entry when hidden.
-            Task::none()
+        Message::TrayAction(TrayAction::ToggleVisible) => {
+            let id = state.window_id;
+            if let Some(id) = id {
+                state.hidden = !state.hidden;
+                if state.hidden {
+                    window::set_mode(id, Mode::Hidden)
+                } else {
+                    window::set_mode(id, Mode::Windowed)
+                }
+            } else {
+                Task::none()
+            }
         }
     }
 }
@@ -241,9 +271,16 @@ fn subscription(_state: &State) -> Subscription<Message> {
         None
     });
     let win = window::open_events().map(Message::WindowResolved);
+    let move_sub = window::events().filter_map(|(_id, ev)| {
+        if let iced::window::Event::Moved(p) = ev {
+            Some(Message::WindowMoved(p))
+        } else {
+            None
+        }
+    });
     let poll = poll_subscription();
     let tray = tray_subscription();
-    Subscription::batch([kb, poll, win, tray])
+    Subscription::batch([kb, poll, win, move_sub, tray])
 }
 
 fn theme(_state: &State) -> Option<Theme> {
@@ -287,6 +324,20 @@ fn apply_events(state: &mut State, events: Vec<RawEvent>) {
     for id in to_remove {
         state.anims.remove(&id);
     }
+}
+
+/// Push the current state into the canvas program. Called after any
+/// state change that affects the rendered view.
+fn sync_program(state: &mut State) {
+    state.program.snapshot = state.snapshot.clone();
+    state.program.set_anims(state.anims.clone());
+    state.program.needs_setup = state.config.pat.trim().is_empty();
+    state.program.status = match &state.poll_status {
+        PollStatus::Idle => None,
+        PollStatus::Polling => None,
+        PollStatus::Error(e) => Some(format!("polling: {e}")),
+        PollStatus::AuthError(e) => Some(format!("auth failed: {e}")),
+    };
 }
 
 /// Deduplicate events by their GitHub `id`. The first occurrence wins.
