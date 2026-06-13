@@ -416,6 +416,69 @@ hover-enter, `disable_mouse_passthrough`; on hover-leave, `enable_mouse_passthro
   source (no prefix) is shown as-is; the `org/` and `repo/` prefixes
   are stripped for display.
 
+## v0.3.1 (added on top of v0.3.0)
+
+- **Per-cycle poll application.** The v0.3.0 poller emitted one
+  `Message::Polled(source, events)` per source, and the GUI rebuilt
+  the snapshot from each batch. The last source polled "won" and
+  every previous source's nodes were animated out, so the timeline
+  flickered to a single source every cycle. Now the poller emits a
+  single `Message::PolledCycle { events, errors }` per cycle,
+  carrying every source's batch at once. The app flattens the events
+  and rebuilds the snapshot in one shot, so all sources stay on
+  screen. New unit test `polled_cycle_applies_all_sources_in_one_shot`
+  exercises the regression.
+- **Debounced position save.** `Message::WindowMoved` fired ~60×/sec
+  during a drag, and the old handler spawned a `Task::future(save_config)`
+  on every event — hundreds of disk writes per drag. Now the handler
+  records `last_position_save_at` and only writes if at least 500 ms
+  have passed since the last save. The in-memory config is updated
+  eagerly, so the next eligible save picks up the latest position
+  and no information is lost. A `config_save_pending` flag ensures
+  that if the user moves, waits 400 ms, and quits, the last move is
+  still flushed synchronously from `Message::Escape` and
+  `TrayAction::Quit`.
+- **Atomic config writes.** `save_config` used `std::fs::write` which
+  truncates and writes non-atomically — a kill mid-write would leave
+  a zero-byte or partial file and `load_config` would fail. Now the
+  helper serializes to `<path>.toml.tmp` then `std::fs::rename`s over
+  the target. `rename` is atomic on POSIX and
+  `MoveFileEx(REPLACE_EXISTING)`-equivalent on Windows. A kill
+  mid-write leaves the previous good file intact. A new test
+  (`save_config_to_writes_final_file_atomically`) verifies that no
+  stale `.tmp` is left behind after a successful save.
+
+## v0.3.1 follow-ups (open)
+
+- **#4 Malformed repo in config desyncs the source list.** A user
+  config with `repos = ["nope"]` (missing `owner/`) is accepted by
+  `Config::validate` and stored, but `Poller::poll_once` silently
+  drops the malformed entry. The poller's `intern_sources` and
+  `poll_once` indices stay aligned for that case, but if the user
+  later edits the file to fix the format and restarts, the in-memory
+  state has a stale entry. Decide whether `Config::validate` should
+  reject malformed `owner/name` outright (cleaner) or whether the
+  poller should warn-and-skip with a banner.
+- **#5 Single-instance enforcement.** Nothing prevents two `gh-monitor`
+  instances from running at once. They'll both poll GitHub (2× the
+  rate-limit pressure) and both try to grab the tray icon. Options:
+  a PID file in the config dir with a startup check, or an OS-level
+  named lock (Linux `flock` on a XDG runtime file, macOS
+  `NSLock`-style via `flock`, Windows named mutex). PID file is
+  simpler; OS lock is more robust to crashes.
+- **#6 429 (rate-limit) reset handling.** The GitHub client parses
+  the `X-RateLimit-Reset` header and surfaces the time-to-reset on
+  errors, but `Poller::run` sleeps a flat 5 s after any error
+  regardless of type. On a 429, we should sleep until the reset
+  timestamp instead. Need to thread the `Option<Instant>` reset
+  time from `ClientError` up through `PollError` to the run loop.
+- **#7 Silently swallowed errors.** `install_poller_if_configured`
+  returns `false` on `Auth::new` failure (bad PAT format) and on a
+  poisoned `POLL_BUILD` lock — both with no log. The user sees
+  "nothing happens" and `gh-monitor doctor` reports the config as
+  valid. The 401/403 path is loud but pre-flight validation failures
+  are invisible.
+
 ## v0.4.0 (added on top of v0.3.0)
 
 - **Diagnostic command.** `gh-monitor doctor` runs a fixed set of

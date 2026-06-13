@@ -44,22 +44,28 @@ pub enum PollError {
     Auth(String),
 }
 
-/// One item emitted by the poller on its `items` channel. Lets the GUI
-/// surface transient errors and auth failures in the UI rather than only
-/// seeing successful event batches. Each item carries a `&'static str`
-/// source label so the GUI can track per-source status (e.g. `"received"`,
-/// `"org/rust-lang"`, `"repo/octocat/Hello-World"`).
+/// One item emitted by the poller on its `items` channel. A single
+/// [`PollItem::Cycle`] is emitted per poll cycle, carrying events from
+/// every source plus any per-source errors. Batching per cycle (rather
+/// than per source) lets the GUI apply all events in one shot — if the
+/// GUI rebuilt the snapshot per source, the last source polled would
+/// "win" and the rest would flicker out.
+///
+/// Each entry carries a `&'static str` source label so the GUI can
+/// track per-source status (e.g. `"received"`, `"org/rust-lang"`,
+/// `"repo/octocat/Hello-World"`). Auth errors and transient errors are
+/// both reported as `errors` — the message string tells them apart and
+/// the GUI formats them the same way.
 #[derive(Debug, Clone)]
 pub enum PollItem {
-    /// A source was polled successfully and produced these events (the
-    /// vec may be empty).
-    Events(&'static str, Vec<RawEvent>),
-    /// A poll failed (transient — server error, network, rate-limit). The
-    /// poller keeps running; the UI can show a status line.
-    Error(&'static str, String),
-    /// GitHub returned 401/403. Surfaced separately because it's terminal
-    /// (the PAT is wrong or expired) and the UI should be loud about it.
-    AuthError(&'static str, String),
+    /// A full poll cycle completed. `events` lists every source that was
+    /// polled (the per-source `Vec<RawEvent>` may be empty on a clean
+    /// poll); `errors` lists sources that failed this cycle (transient
+    /// or auth — same banner treatment).
+    Cycle {
+        events: Vec<(&'static str, Vec<RawEvent>)>,
+        errors: Vec<(&'static str, String)>,
+    },
 }
 
 /// Per-source outcome of a single poll cycle.
@@ -188,6 +194,9 @@ impl Poller {
             ticker.tick().await;
             let outcome = self.poll_once().await;
             let mut had_error = false;
+            let mut events_out: Vec<(&'static str, Vec<RawEvent>)> =
+                Vec::with_capacity(outcome.sources.len());
+            let mut errors_out: Vec<(&'static str, String)> = Vec::new();
             for source in outcome.sources {
                 if !source.events.is_empty() {
                     debug!(
@@ -198,25 +207,24 @@ impl Poller {
                 }
                 for err in &source.errors {
                     had_error = true;
-                    let item = match err {
-                        PollError::Client(ClientError::Unauthorized(msg)) => {
-                            PollItem::AuthError(source.source, msg.clone())
-                        }
-                        _ => PollItem::Error(source.source, err.to_string()),
+                    let msg = match err {
+                        PollError::Client(ClientError::Unauthorized(msg)) => msg.clone(),
+                        _ => err.to_string(),
                     };
-                    if tx.send(item).await.is_err() {
-                        warn!("poller receiver dropped; stopping");
-                        return;
-                    }
+                    errors_out.push((source.source, msg));
                 }
-                if tx
-                    .send(PollItem::Events(source.source, source.events))
-                    .await
-                    .is_err()
-                {
-                    warn!("poller receiver dropped; stopping");
-                    return;
-                }
+                events_out.push((source.source, source.events));
+            }
+            if tx
+                .send(PollItem::Cycle {
+                    events: events_out,
+                    errors: errors_out,
+                })
+                .await
+                .is_err()
+            {
+                warn!("poller receiver dropped; stopping");
+                return;
             }
             if had_error {
                 // back off briefly so we don't spin on persistent errors
@@ -528,19 +536,21 @@ mod tests {
             .expect("poller should produce an item within 2s")
             .expect("rx should not be closed");
         match item {
-            PollItem::Events(source, evs) => {
-                assert_eq!(source, "received");
-                assert_eq!(evs.len(), 1);
+            PollItem::Cycle { events, errors } => {
+                assert!(errors.is_empty(), "no errors expected, got {errors:?}");
+                assert_eq!(events.len(), 1);
+                assert_eq!(events[0].0, "received");
+                assert_eq!(events[0].1.len(), 1);
             }
-            other => panic!("expected Events, got {other:?}"),
         }
     }
 
     #[tokio::test]
-    async fn run_emits_per_source_items() {
+    async fn run_emits_one_cycle_per_tick() {
         // One source succeeds, the other returns 500. The run loop should
-        // emit one Events item for the successful source and one Error
-        // item for the failing source, each tagged with the right label.
+        // emit a single `PollItem::Cycle` per tick with both sources in
+        // `events` (the failing one with an empty event vec) and the
+        // failure in `errors`.
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/users/octocat/received_events"))
@@ -578,32 +588,18 @@ mod tests {
         .unwrap();
         let (fut, mut rx) = poller.into_run();
         let _join = tokio::spawn(fut);
-        // Collect the first cycle's items (expect: Events(received, [...]),
-        // Error(org/rust-lang, ...), Events(org/rust-lang, []) — order
-        // matches poll order).
-        let mut events_received = None;
-        let mut error_received = None;
-        let mut org_empty_events = None;
-        for _ in 0..3 {
-            let item = tokio::time::timeout(Duration::from_secs(2), rx.recv())
-                .await
-                .expect("poller should produce an item within 2s")
-                .expect("rx should not be closed");
-            match item {
-                PollItem::Events("received", evs) if !evs.is_empty() => {
-                    events_received = Some(evs.len());
-                }
-                PollItem::Error("org/rust-lang", _) => {
-                    error_received = Some("org/rust-lang");
-                }
-                PollItem::Events("org/rust-lang", evs) => {
-                    org_empty_events = Some(evs.is_empty());
-                }
-                other => panic!("unexpected item: {other:?}"),
-            }
-        }
-        assert_eq!(events_received, Some(1));
-        assert_eq!(error_received, Some("org/rust-lang"));
-        assert_eq!(org_empty_events, Some(true));
+        let item = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("poller should produce a cycle within 2s")
+            .expect("rx should not be closed");
+        let PollItem::Cycle { events, errors } = item;
+        assert_eq!(events.len(), 2, "both sources in events vec");
+        let recv_evs: Vec<(&'static str, usize)> =
+            events.iter().map(|(s, e)| (*s, e.len())).collect();
+        assert!(recv_evs.contains(&("received", 1)));
+        assert!(recv_evs.contains(&("org/rust-lang", 0)));
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].0, "org/rust-lang");
+        assert!(errors[0].1.contains("500"));
     }
 }

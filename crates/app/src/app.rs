@@ -41,6 +41,17 @@ pub struct State {
     pub snapshot: TimelineSnapshot,
     pub anims: HashMap<NodeId, NodeAnim>,
     pub overlay: OverlayState,
+    /// Last time a window-move triggered a debounced config save. Used to
+    /// throttle disk writes: we only persist at most once per
+    /// `POSITION_SAVE_DEBOUNCE` window. The next save picks up the
+    /// latest position from `state.config.window_position`, so the
+    /// debounce loses no information.
+    pub last_position_save_at: Option<Instant>,
+    /// `true` when a `WindowMoved` event has arrived but its save was
+    /// throttled. On quit (`Message::Escape` / `TrayAction::Quit`) we
+    /// perform a final synchronous save if this is set, so the user
+    /// doesn't lose the last move.
+    pub config_save_pending: bool,
     /// Whether the cursor has entered the overlay at least once. While
     /// false, we keep the window in `Active` (non-passthrough) so the
     /// user can interact with it on first launch. The first time the
@@ -175,13 +186,17 @@ fn display_source(source: &str) -> &str {
 /// Messages that drive the application.
 #[derive(Debug, Clone)]
 pub enum Message {
-    /// A source was polled and produced these raw events. The source
-    /// label is recorded against the per-source status.
-    Polled(&'static str, Vec<RawEvent>),
-    /// A source errored (transient).
-    PollError(&'static str, String),
-    /// GitHub returned 401/403 for a source — fatal, surface in UI.
-    AuthError(&'static str, String),
+    /// A poll cycle completed. `events` carries every source's batch in
+    /// poll order (a source with no new events is still present with an
+    /// empty vec, so the per-source "OK" status is updated for it too).
+    /// `errors` lists per-source transient and auth errors from the same
+    /// cycle. The update handler applies the flattened events in one
+    /// shot — emitting one message per source would re-build the
+    /// snapshot per source and the last one would clobber the rest.
+    PolledCycle {
+        events: Vec<(&'static str, Vec<RawEvent>)>,
+        errors: Vec<(&'static str, String)>,
+    },
     /// Cursor entered the overlay.
     HoverEntered,
     /// Cursor left the overlay.
@@ -237,6 +252,8 @@ pub fn run(settings: AppSettings) -> anyhow::Result<()> {
                 snapshot: TimelineSnapshot::default(),
                 anims: HashMap::new(),
                 overlay: OverlayState::Active,
+                last_position_save_at: None,
+                config_save_pending: false,
                 has_hovered: false,
                 hidden: false,
                 poll_status: PollStatus::default(),
@@ -259,22 +276,30 @@ pub fn run(settings: AppSettings) -> anyhow::Result<()> {
 
 fn update(state: &mut State, message: Message) -> Task<Message> {
     match message {
-        Message::Polled(source, events) => {
+        Message::PolledCycle { events, errors } => {
+            // A full poll cycle completed. Apply events from every
+            // source in one shot so the previous source's items aren't
+            // clobbered by the next source's batch (which is what
+            // happens when the snapshot is rebuilt per source).
             state.last_poll_at = Some(Instant::now());
-            state.poll_status.record_ok(source);
-            apply_events(state, events);
-            sync_program(state);
-            Task::none()
-        }
-        Message::PollError(source, e) => {
-            warn!(source = source, error = %e, "poll error");
-            state.poll_status.record_error(source, e);
-            sync_program(state);
-            Task::none()
-        }
-        Message::AuthError(source, e) => {
-            error!(source = source, error = %e, "auth error");
-            state.poll_status.record_auth_error(source, e);
+            let mut all_events: Vec<RawEvent> = Vec::new();
+            for (source, evs) in events {
+                state.poll_status.record_ok(source);
+                all_events.extend(evs);
+            }
+            for (source, e) in errors {
+                if e.contains("401")
+                    || e.contains("403")
+                    || e.to_ascii_lowercase().contains("unauthorized")
+                {
+                    error!(source = source, error = %e, "auth error");
+                    state.poll_status.record_auth_error(source, e);
+                } else {
+                    warn!(source = source, error = %e, "poll error");
+                    state.poll_status.record_error(source, e);
+                }
+            }
+            apply_events(state, all_events);
             sync_program(state);
             Task::none()
         }
@@ -312,31 +337,52 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             window::disable_mouse_passthrough(id)
         }
         Message::WindowMoved(p) => {
-            // Persist the new position to the config. We update the
-            // in-memory config and write to disk. Writes happen on
-            // every move event (the config is small — ~100 bytes —
-            // and the OS will coalesce), so the user gets
-            // position-persisted-on-quit semantics with no extra
-            // plumbing.
+            // Persist the new position to the config. A drag fires this
+            // ~60×/sec, so we throttle disk writes to one per
+            // POSITION_SAVE_DEBOUNCE. The in-memory config is updated
+            // eagerly; the next debounce-eligible save picks up the
+            // latest position. If a save is throttled we set
+            // `config_save_pending` so the quit path can flush.
             state.config.window_position = Some(WindowPosition {
                 x: p.x as i32,
                 y: p.y as i32,
             });
-            let cfg = state.config.clone();
-            iced::Task::future(async move {
-                if let Err(e) = crate::config_io::save_config(&cfg) {
-                    warn!(error = %e, "failed to persist window position");
-                }
-            })
-            .discard()
+            let now = Instant::now();
+            let should_save = state
+                .last_position_save_at
+                .map_or(true, |t| now.duration_since(t) >= POSITION_SAVE_DEBOUNCE);
+            if should_save {
+                state.last_position_save_at = Some(now);
+                state.config_save_pending = false;
+                let cfg = state.config.clone();
+                iced::Task::future(async move {
+                    if let Err(e) = crate::config_io::save_config(&cfg) {
+                        warn!(error = %e, "failed to persist window position");
+                    }
+                })
+                .discard()
+            } else {
+                state.config_save_pending = true;
+                Task::none()
+            }
         }
         Message::DragWindow => match state.window_id {
             Some(id) => window::drag(id),
             None => Task::none(),
         },
-        Message::Escape => iced::exit(),
+        Message::Escape => {
+            if state.config_save_pending {
+                flush_pending_position_save(state);
+            }
+            iced::exit()
+        }
         Message::Refresh => Task::none(),
-        Message::TrayAction(TrayAction::Quit) => iced::exit(),
+        Message::TrayAction(TrayAction::Quit) => {
+            if state.config_save_pending {
+                flush_pending_position_save(state);
+            }
+            iced::exit()
+        }
         Message::TrayAction(TrayAction::ToggleVisible) => {
             let id = state.window_id;
             if let Some(id) = id {
@@ -350,6 +396,29 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                 Task::none()
             }
         }
+    }
+}
+
+/// The minimum interval between two config-on-disk writes triggered by
+/// `Message::WindowMoved`. Drags emit ~60 events/sec; writing on every
+/// event would do hundreds of disk writes per drag.
+const POSITION_SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
+
+/// Decide whether a `WindowMoved` should trigger a disk write given the
+/// timestamp of the last successful save. Pure: extracted so the
+/// debounce policy is testable without an Iced runtime.
+fn should_save_position(now: Instant, last: Option<Instant>) -> bool {
+    last.map_or(true, |t| now.duration_since(t) >= POSITION_SAVE_DEBOUNCE)
+}
+
+/// Synchronously flush the pending window position to disk. Called on
+/// quit when a debounced save was skipped, so the user's last drag
+/// position is never lost.
+fn flush_pending_position_save(state: &mut State) {
+    state.config_save_pending = false;
+    state.last_position_save_at = Some(Instant::now());
+    if let Err(e) = crate::config_io::save_config(&state.config) {
+        warn!(error = %e, "failed to flush pending position save");
     }
 }
 
@@ -483,9 +552,9 @@ fn poll_subscription() -> Subscription<Message> {
                 tokio::spawn(fut);
                 while let Some(item) = rx.recv().await {
                     let msg = match item {
-                        PollItem::Events(source, events) => Message::Polled(source, events),
-                        PollItem::Error(source, e) => Message::PollError(source, e),
-                        PollItem::AuthError(source, e) => Message::AuthError(source, e),
+                        PollItem::Cycle { events, errors } => {
+                            Message::PolledCycle { events, errors }
+                        }
                     };
                     if output.send(msg).await.is_err() {
                         break;
@@ -702,6 +771,131 @@ mod tests {
         assert_eq!(
             format_poll_status(&s),
             Some("rust-lang: second".to_string())
+        );
+    }
+
+    #[test]
+    fn should_save_position_is_true_when_never_saved() {
+        // No prior save → must save.
+        let now = Instant::now();
+        assert!(should_save_position(now, None));
+    }
+
+    #[test]
+    fn should_save_position_is_true_after_debounce_window() {
+        // Last save was long enough ago that we're allowed to save again.
+        let now = Instant::now();
+        let last = now.checked_sub(POSITION_SAVE_DEBOUNCE + std::time::Duration::from_millis(1));
+        assert!(should_save_position(now, last));
+    }
+
+    #[test]
+    fn should_save_position_is_false_within_debounce_window() {
+        // Last save was 100ms ago → must NOT save again.
+        let now = Instant::now();
+        let last = now.checked_sub(std::time::Duration::from_millis(100));
+        assert!(!should_save_position(now, last));
+    }
+
+    fn test_state() -> State {
+        State {
+            config: Config {
+                pat: "ghp_test".to_string(),
+                username: Some("octocat".to_string()),
+                orgs: vec!["rust-lang".to_string()],
+                repos: vec![],
+                poll_interval_secs: 30,
+                window_position: None,
+            },
+            snapshot: TimelineSnapshot::default(),
+            anims: HashMap::new(),
+            overlay: OverlayState::Active,
+            last_position_save_at: None,
+            config_save_pending: false,
+            has_hovered: false,
+            hidden: false,
+            poll_status: PollStatus::default(),
+            last_poll_at: None,
+            program: TimelineProgram::new(),
+            window_id: None,
+        }
+    }
+
+    #[test]
+    fn polled_cycle_applies_all_sources_in_one_shot() {
+        // Two sources with one event each. The single PolledCycle must
+        // build a snapshot that contains BOTH events — the v0.3.0
+        // per-source apply_events only kept the last source's batch
+        // and animated the rest out.
+        let mut s = test_state();
+        let e1 = ev("e1", "x/y", EventKind::PrOpened, 100);
+        let e2 = ev("e2", "a/b", EventKind::PrOpened, 50);
+        let _ = update(
+            &mut s,
+            Message::PolledCycle {
+                events: vec![("received", vec![e1]), ("org/rust-lang", vec![e2])],
+                errors: vec![],
+            },
+        );
+        // Both repos should appear in the snapshot.
+        let repos: Vec<&str> = s.snapshot.nodes.iter().map(|n| n.repo.as_str()).collect();
+        assert!(repos.contains(&"x/y"), "received event missing: {repos:?}");
+        assert!(
+            repos.contains(&"a/b"),
+            "org event missing (regression of per-source clobber bug): {repos:?}"
+        );
+        // Both sources recorded as Ok.
+        let sources: Vec<&'static str> = s.poll_status.iter().map(|e| e.source).collect();
+        assert!(sources.contains(&"received"));
+        assert!(sources.contains(&"org/rust-lang"));
+    }
+
+    #[test]
+    fn polled_cycle_records_per_source_errors() {
+        let mut s = test_state();
+        let _ = update(
+            &mut s,
+            Message::PolledCycle {
+                events: vec![("received", vec![]), ("org/rust-lang", vec![])],
+                errors: vec![
+                    ("org/rust-lang", "500 Server Error".to_string()),
+                    ("repo/octocat/Hello-World", "401 Unauthorized".to_string()),
+                ],
+            },
+        );
+        // Two sources with non-Ok status → "polling (1/3 ok)".
+        assert_eq!(
+            format_poll_status(&s.poll_status),
+            Some("polling (1/3 ok)".to_string())
+        );
+    }
+
+    #[test]
+    fn window_moved_first_event_records_pending_false() {
+        // First WindowMoved: last_position_save_at is None, so should_save is
+        // true; config_save_pending should be cleared (we did save).
+        let mut s = test_state();
+        let _ = update(&mut s, Message::WindowMoved(iced::Point::new(10.0, 20.0)));
+        assert!(s.last_position_save_at.is_some());
+        assert!(!s.config_save_pending);
+        assert_eq!(
+            s.config.window_position,
+            Some(WindowPosition { x: 10, y: 20 })
+        );
+    }
+
+    #[test]
+    fn window_moved_within_debounce_window_marks_pending() {
+        // Simulate the second WindowMoved in a drag: last_position_save_at
+        // is "now" so should_save is false; config_save_pending flips
+        // to true and the position is still updated in memory.
+        let mut s = test_state();
+        s.last_position_save_at = Some(Instant::now());
+        let _ = update(&mut s, Message::WindowMoved(iced::Point::new(50.0, 60.0)));
+        assert!(s.config_save_pending);
+        assert_eq!(
+            s.config.window_position,
+            Some(WindowPosition { x: 50, y: 60 })
         );
     }
 }
