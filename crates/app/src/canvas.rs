@@ -13,6 +13,21 @@ use crate::app::Message;
 use crate::paint::{layout, NodeClass, NodeRect};
 use gh_monitor_timeline::{NodeId, TimelineNode, TimelineSnapshot};
 
+/// Top-right "🎬 Demo" button geometry. The button sits in the
+/// chrome strip above the first node and is hit-tested before any
+/// node so a click on the button never falls through to a node
+/// hit-test. Width/height are in canvas-local units.
+const DEMO_BTN_WIDTH: f32 = 76.0;
+const DEMO_BTN_HEIGHT: f32 = 24.0;
+/// Margin from the canvas edges to the demo button and indicator.
+const DEMO_CHROME_MARGIN: f32 = 8.0;
+/// Gap between the demo button and the indicator rectangle when
+/// both are drawn side by side.
+const DEMO_BTN_INDICATOR_GAP: f32 = 8.0;
+/// Height of the "Demo running — XXs left" indicator. Same as the
+/// button so they share a top row.
+const DEMO_INDICATOR_HEIGHT: f32 = 24.0;
+
 /// The canvas program. Holds the current snapshot, the per-node animation
 /// state, and the current window id.
 #[derive(Debug)]
@@ -25,6 +40,11 @@ pub struct TimelineProgram {
     /// Whether the user has no PAT configured. The status banner will
     /// include setup instructions in that case.
     pub needs_setup: bool,
+    /// Seconds left in the active demo, or `None` when no demo is
+    /// running. The "🎬 Demo" button is drawn unconditionally; the
+    /// indicator is only drawn when this is `Some`. Set from the
+    /// app's `sync_program` after every state change.
+    pub demo_remaining_secs: Option<u64>,
 }
 
 impl Default for TimelineProgram {
@@ -41,6 +61,7 @@ impl TimelineProgram {
             window_id: None,
             status: None,
             needs_setup: false,
+            demo_remaining_secs: None,
         }
     }
 
@@ -111,10 +132,24 @@ impl Program<Message, iced::Theme, iced::Renderer> for TimelineProgram {
         }
 
         // Status banner overlay (drawn on top of the timeline).
-        if self.snapshot.nodes.is_empty() {
+        // When a demo is active we suppress the empty/setup state so
+        // the user sees the demo timeline instead of "No personal
+        // access token set." or "No recent activity" during the
+        // first ~1s gap before the first scripted event fires.
+        let demo_active = self.demo_remaining_secs.is_some();
+        if self.snapshot.nodes.is_empty() && !demo_active {
             draw_empty_state(&mut frame, bounds, self.status.as_deref(), self.needs_setup);
         } else if let Some(s) = &self.status {
             draw_status_banner(&mut frame, bounds, s);
+        }
+
+        // Demo chrome: the "🎬 Demo" button is always drawn in the
+        // top-right; the "Demo running — XXs left" indicator is
+        // drawn alongside it only when a demo is active. Drawn
+        // last so it overlays any status banner.
+        draw_demo_button(&mut frame, bounds);
+        if let Some(remaining) = self.demo_remaining_secs {
+            draw_demo_indicator(&mut frame, bounds, remaining);
         }
 
         vec![frame.into_geometry()]
@@ -132,6 +167,13 @@ impl Program<Message, iced::Theme, iced::Renderer> for TimelineProgram {
 
         if let Some(p) = cursor_pos {
             if let Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) = event {
+                // Demo button first — it sits in the chrome strip
+                // above the first node and must take priority over
+                // any node that might happen to overlap (the status
+                // banner overlays the same area).
+                if demo_button_rect(bounds).contains(p) {
+                    return Some(Action::publish(Message::StartDemo));
+                }
                 for rect in &rects {
                     if rect.contains(p) {
                         let node = &self.snapshot.nodes[rect.index];
@@ -141,9 +183,7 @@ impl Program<Message, iced::Theme, iced::Renderer> for TimelineProgram {
                         // window-drag and click-to-open both work
                         // reliably. The OS will short-circuit a drag
                         // on a quick click, and the URL still opens.
-                        return Some(Action::publish(Message::OpenUrl(
-                            node.target_url.clone(),
-                        )));
+                        return Some(Action::publish(Message::OpenUrl(node.target_url.clone())));
                     }
                 }
                 // Empty area: trigger window drag. Without this,
@@ -165,6 +205,13 @@ impl Program<Message, iced::Theme, iced::Renderer> for TimelineProgram {
     ) -> mouse::Interaction {
         let (rects, _) = layout(&self.snapshot, bounds.width);
         if let Some(p) = cursor.position_in(bounds) {
+            // Demo button takes priority over nodes — the button
+            // lives in the chrome strip that overlaps the first
+            // node, so a node hit-test alone would show a pointer
+            // cursor even when the cursor is on the button.
+            if demo_button_rect(bounds).contains(p) {
+                return Interaction::Pointer;
+            }
             for rect in &rects {
                 if rect.contains(p) {
                     return Interaction::Pointer;
@@ -227,6 +274,115 @@ pub(crate) fn empty_state_lines(needs_setup: bool, status: Option<&str>) -> Vec<
 /// without touching the draw code.
 pub(crate) fn status_banner_text(text: &str) -> &str {
     text
+}
+
+/// The rectangle of the "🎬 Demo" button in canvas-local coordinates.
+/// Pure helper so the hit-test and the draw path agree on the
+/// exact bounds.
+fn demo_button_rect(bounds: Rectangle) -> Rectangle {
+    Rectangle {
+        x: bounds.width - DEMO_CHROME_MARGIN - DEMO_BTN_WIDTH,
+        y: DEMO_CHROME_MARGIN,
+        width: DEMO_BTN_WIDTH,
+        height: DEMO_BTN_HEIGHT,
+    }
+}
+
+/// The rectangle of the "Demo running — XXs left" indicator.
+/// Sits to the LEFT of the demo button in the same top row.
+fn demo_indicator_rect(bounds: Rectangle) -> Rectangle {
+    let x_right_of_indicator =
+        bounds.width - DEMO_CHROME_MARGIN - DEMO_BTN_WIDTH - DEMO_BTN_INDICATOR_GAP;
+    Rectangle {
+        x: DEMO_CHROME_MARGIN,
+        y: DEMO_CHROME_MARGIN,
+        width: (x_right_of_indicator - DEMO_CHROME_MARGIN).max(0.0),
+        height: DEMO_INDICATOR_HEIGHT,
+    }
+}
+
+/// Draw the "🎬 Demo" button in the top-right corner. The button
+/// is always visible (even when no demo is running) so the user
+/// knows the feature exists. The text is right-aligned within the
+/// button with a small inner padding.
+fn draw_demo_button(frame: &mut Frame, bounds: Rectangle) {
+    let rect = demo_button_rect(bounds);
+    let bg = Path::rounded_rectangle(
+        Point::new(rect.x, rect.y),
+        Size::new(rect.width, rect.height),
+        border::Radius::new(6.0),
+    );
+    frame.fill(
+        &bg,
+        Color {
+            r: 1.0,
+            g: 1.0,
+            b: 1.0,
+            a: 0.08,
+        },
+    );
+    frame.stroke(
+        &bg,
+        Stroke::default()
+            .with_color(Color {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 0.18,
+            })
+            .with_width(1.0),
+    );
+    frame.fill_text(canvas::Text {
+        content: "🎬 Demo".to_string(),
+        position: Point::new(rect.x + rect.width - 10.0, rect.y + 5.0),
+        max_width: rect.width - 14.0,
+        color: Color {
+            r: 1.0,
+            g: 1.0,
+            b: 1.0,
+            a: 0.95,
+        },
+        size: 12.0.into(),
+        align_x: iced::alignment::Horizontal::Right.into(),
+        ..canvas::Text::default()
+    });
+}
+
+/// Draw the "Demo running — XXs left" indicator. A short pill
+/// with the same background as the button and a "Demo running"
+/// label, so the user knows the timer is counting down.
+fn draw_demo_indicator(frame: &mut Frame, bounds: Rectangle, remaining_secs: u64) {
+    let rect = demo_indicator_rect(bounds);
+    if rect.width <= 0.0 {
+        return;
+    }
+    let bg = Path::rounded_rectangle(
+        Point::new(rect.x, rect.y),
+        Size::new(rect.width, rect.height),
+        border::Radius::new(6.0),
+    );
+    frame.fill(
+        &bg,
+        Color {
+            r: 0.30,
+            g: 0.45,
+            b: 0.80,
+            a: 0.40,
+        },
+    );
+    frame.fill_text(canvas::Text {
+        content: format!("Demo running — {remaining_secs}s left"),
+        position: Point::new(rect.x + 10.0, rect.y + 5.0),
+        max_width: rect.width - 14.0,
+        color: Color {
+            r: 1.0,
+            g: 1.0,
+            b: 1.0,
+            a: 0.95,
+        },
+        size: 12.0.into(),
+        ..canvas::Text::default()
+    });
 }
 
 /// Draw the "empty" state in the middle of the canvas. Shown when the
@@ -453,5 +609,51 @@ mod tests {
     fn empty_state_lines_default_when_no_status_no_setup() {
         let lines = empty_state_lines(false, None);
         assert_eq!(lines, vec!["No recent activity".to_string()]);
+    }
+
+    #[test]
+    fn demo_button_anchored_to_top_right_with_margin() {
+        // The button must always sit in the top-right of the
+        // canvas with the configured margin so a click there
+        // hits `Message::StartDemo` instead of a node.
+        let bounds = Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 420.0,
+            height: 540.0,
+        };
+        let r = demo_button_rect(bounds);
+        assert_eq!(r.x, 420.0 - 8.0 - 76.0);
+        assert_eq!(r.y, 8.0);
+        assert_eq!(r.width, 76.0);
+        assert_eq!(r.height, 24.0);
+        // The centre of the button is inside the button.
+        assert!(r.contains(Point::new(r.x + r.width / 2.0, r.y + r.height / 2.0)));
+        // The left edge of the first node (x=12) is NOT in the
+        // button.
+        assert!(!r.contains(Point::new(12.0, r.y + 4.0)));
+    }
+
+    #[test]
+    fn demo_indicator_shares_top_row_with_button() {
+        // The indicator must not overlap the button and must be
+        // drawn at the same y as the button.
+        let bounds = Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 420.0,
+            height: 540.0,
+        };
+        let btn = demo_button_rect(bounds);
+        let ind = demo_indicator_rect(bounds);
+        assert_eq!(ind.y, btn.y, "indicator and button share top row");
+        assert_eq!(ind.height, btn.height);
+        assert!(
+            ind.x + ind.width <= btn.x,
+            "indicator must end before the button starts: ind.x={} ind.width={} btn.x={}",
+            ind.x,
+            ind.width,
+            btn.x
+        );
     }
 }

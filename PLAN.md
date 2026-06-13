@@ -513,4 +513,18 @@ hover-enter, `disable_mouse_passthrough`; on hover-leave, `enable_mouse_passthro
 - **Tray / settings UI.** A clickable tray icon to open a settings
   panel (repo/org list, PAT input). v1 ships with config-from-file +
   env vars only.
+- **Demo mode.** A "🎬 Demo" button in the top-right of the canvas
+  replays a 120-second scripted sequence of ten fake GitHub events
+  across four repos. The script exercises every animation path the
+  real poll path uses: a new-node fade-in, an update pulse when a
+  count goes from 1 → 2 → 3 in the same `(repo, kind)` group, a
+  new group when a new kind is added to a repo, a "new repo
+  created" standalone (gold accent, never compressed), and a
+  release event. The events fire 1.0 s apart on whole-second
+  boundaries; the canvas shows a "Demo running — XXs left"
+  indicator that counts down to 0, at which point the demo state
+  is cleared and the final timeline stays visible. Re-clicking the
+  button re-runs the script from a clean slate. The demo state is
+  pure: it does not call the GitHub API, write to the config file,
+  or persist across restarts.
 - ~~**Interactive setup wizard.**~~ Shipped in v0.2.0 — see above.

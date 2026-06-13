@@ -6,6 +6,36 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Demo mode.** A "🎬 Demo" button in the top-right of the canvas
+  replays a 120-second scripted sequence of ten fake GitHub events
+  across four repos (`rust-lang/rust`, `tokio-rs/tokio`,
+  `acme-corp/secret-project`, `serde-rs/serde`). The sequence
+  exercises every animation path the real poll path produces: a
+  new-node fade-in (rust-lang/rust, tokio-rs/tokio,
+  serde-rs/serde), an update pulse when a count goes from 1 → 2 →
+  3 in the same `(repo, kind)` group, a new group when a different
+  kind is added (rust-lang/rust gets `PrOpened`, then `PrMerged`,
+  then `IssueOpened`; tokio-rs/tokio gets `PrOpened`, then
+  `IssueOpened`, then a `PrOpened` pulse), a "new repo created"
+  standalone (acme-corp/secret-project with the gold accent), and
+  a release event. Events fire 1.0 s apart on whole-second
+  boundaries. While the demo is active the canvas shows a "Demo
+  running — XXs left" pill that counts down to 0; when the window
+  elapses the demo state is cleared and the final timeline stays
+  visible. Clicking the button again re-runs the script from a
+  clean slate. The demo is pure — it does not call the GitHub
+  API, write to the config file, or persist across restarts.
+  Implementation lives in `crates/app/src/demo.rs` (the
+  `DemoState` schedule + `drain_due`); the canvas renders the
+  button and indicator and hit-tests the button in
+  `crates/app/src/canvas.rs`; the `iced::time::every(100ms)`
+  subscription drives `Message::FrameTick` in
+  `crates/app/src/app.rs`. New tests cover the script shape, the
+  scheduled offsets, the `drain_due` cursor advance, the
+  `FrameTick` → `apply_events` integration, the auto-clear at
+  `DEMO_TOTAL_SECS`, and the button/indicator geometry.
+
 ## [1.0.1] — 2026-06-13
 
 Two targeted polish fixes on top of v1.0.0. No behaviour change for
