@@ -33,10 +33,14 @@ impl Default for ClientConfig {
 }
 
 /// Errors from the GitHub client.
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum ClientError {
+    /// Transport-level failure (DNS, TCP, TLS, timeout, etc.). The
+    /// `reqwest::Error`'s `Display` is captured as a string so the
+    /// variant is `Clone` — that lets it flow through Iced messages
+    /// and through the poller's `mpsc` channel without a wrapper.
     #[error("HTTP error: {0}")]
-    Http(#[from] reqwest::Error),
+    Http(String),
     /// `429 Too Many Requests`. `reset_at` carries the absolute Unix
     /// epoch seconds when the rate-limit window resets, parsed from
     /// the `X-RateLimit-Reset` header (or, as a fallback, the
@@ -54,6 +58,12 @@ pub enum ClientError {
     Parse(String),
     #[error("events API: {0}")]
     Events(String),
+}
+
+impl From<reqwest::Error> for ClientError {
+    fn from(e: reqwest::Error) -> Self {
+        ClientError::Http(e.to_string())
+    }
 }
 
 /// The HTTP client. Cheap to clone (uses an `Arc` internally via reqwest).

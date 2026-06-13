@@ -53,18 +53,18 @@ pub enum PollError {
 ///
 /// Each entry carries a `&'static str` source label so the GUI can
 /// track per-source status (e.g. `"received"`, `"org/rust-lang"`,
-/// `"repo/octocat/Hello-World"`). Auth errors and transient errors are
-/// both reported as `errors` — the message string tells them apart and
-/// the GUI formats them the same way.
+/// `"repo/octocat/Hello-World"`). Errors are emitted as the typed
+/// [`ClientError`] so the GUI can distinguish auth (`Unauthorized`,
+/// `RateLimited`) from transient (`Server`, `Http`, etc.) without
+/// parsing the `Display` string.
 #[derive(Debug, Clone)]
 pub enum PollItem {
     /// A full poll cycle completed. `events` lists every source that was
     /// polled (the per-source `Vec<RawEvent>` may be empty on a clean
-    /// poll); `errors` lists sources that failed this cycle (transient
-    /// or auth — same banner treatment).
+    /// poll); `errors` lists sources that failed this cycle.
     Cycle {
         events: Vec<(&'static str, Vec<RawEvent>)>,
-        errors: Vec<(&'static str, String)>,
+        errors: Vec<(&'static str, ClientError)>,
     },
 }
 
@@ -196,7 +196,7 @@ impl Poller {
             let mut had_error = false;
             let mut events_out: Vec<(&'static str, Vec<RawEvent>)> =
                 Vec::with_capacity(outcome.sources.len());
-            let mut errors_out: Vec<(&'static str, String)> = Vec::new();
+            let mut errors_out: Vec<(&'static str, ClientError)> = Vec::new();
             for source in outcome.sources {
                 if !source.events.is_empty() {
                     debug!(
@@ -205,16 +205,13 @@ impl Poller {
                         "poll produced events"
                     );
                 }
-                for err in &source.errors {
+                for err in source.errors {
                     had_error = true;
-                    let msg = match err {
-                        PollError::Client(ClientError::Unauthorized(msg)) => msg.clone(),
-                        PollError::Client(c @ ClientError::RateLimited { .. }) => {
-                            rate_limit_banner(c)
-                        }
-                        _ => err.to_string(),
+                    let client_err = match err {
+                        PollError::Client(c) => c,
+                        PollError::Auth(s) => ClientError::Unauthorized(s),
                     };
-                    errors_out.push((source.source, msg));
+                    errors_out.push((source.source, client_err));
                 }
                 events_out.push((source.source, source.events));
             }
@@ -305,7 +302,11 @@ impl Poller {
 /// `Retry-After`), the banner shows `rate-limited until <HH:MM:SS UTC>`
 /// so the user knows when polling will resume. Without a reset time,
 /// the banner falls back to the generic "rate-limited by GitHub".
-pub(crate) fn rate_limit_banner(err: &ClientError) -> String {
+///
+/// The GUI uses this when rendering `ClientError::RateLimited` in the
+/// status banner, so the format lives with the error type definition
+/// rather than the view layer.
+pub fn rate_limit_banner(err: &ClientError) -> String {
     match err {
         ClientError::RateLimited { reset_at: Some(ts) } => {
             chrono::DateTime::from_timestamp(*ts as i64, 0)
@@ -743,6 +744,8 @@ mod tests {
         assert!(recv_evs.contains(&("org/rust-lang", 0)));
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].0, "org/rust-lang");
-        assert!(errors[0].1.contains("500"));
+        // The 500 maps to `ClientError::Server`, which surfaces the
+        // status in its `Display` so the GUI banner can show it.
+        assert!(matches!(errors[0].1, ClientError::Server(ref s) if s.contains("500")));
     }
 }

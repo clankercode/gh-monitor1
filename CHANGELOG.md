@@ -6,6 +6,47 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.0.1] — 2026-06-13
+
+Two targeted polish fixes on top of v1.0.0. No behaviour change for
+the user-visible overlay; the two fixes tighten the internal
+contracts.
+
+### Fixed
+- **Type-safe `ClientError` over the poll channel.** The poller
+  previously emitted per-source errors as opaque `String`s, and the
+  GUI classified them with substring matches like
+  `e.contains("401") || e.contains("403") || e.contains("unauthorized")`
+  in `crates/app/src/app.rs`. This broke silently if the underlying
+  `ClientError` `Display` impl ever changed wording. v1.0.1 plumbs the
+  typed `gh_monitor_gh::ClientError` through `PollItem::Cycle::errors`
+  and the `Message::PolledCycle` envelope, and the GUI now matches on
+  the variants: `ClientError::Unauthorized` and
+  `ClientError::RateLimited { .. }` are the explicit "auth error"
+  signal; everything else (`Server`, `Http`, `Parse`, `Events`) is
+  "transient". A new test
+  (`polled_cycle_distinguishes_auth_from_transient_via_typed_errors`)
+  feeds both classes through the same cycle and asserts the
+  per-source `PollStatus` records each in the right `SourceStatusKind`
+  — no string matching on the hot path. `ClientError` is now
+  `#[derive(Clone)]` (the `Http` variant stores the `reqwest::Error`
+  `Display` as a `String` so it can flow through Iced messages and
+  the poller's `mpsc` channel) and a manual
+  `From<reqwest::Error> for ClientError` impl keeps the `?` operator
+  ergonomic in `get_events`.
+- **URL scheme check in `open_url`.** `crates/app/src/link.rs::open_url`
+  used to call `open::that(url)` for any string the canvas passed in.
+  The canvas only ever passes URLs from `node.target_url` (GitHub API
+  output or our hard-coded `https://github.com/{repo}`), so this was
+  safe in practice — but it was one bug away from spawning a browser
+  pointed at `javascript:alert(1)`. v1.0.1 parses the URL with
+  `url::Url` and only proceeds for `http`/`https`; everything else
+  (non-HTTP schemes, malformed strings) is logged at WARN and dropped.
+  A new `open_url_with` helper takes the opener as a closure so tests
+  can stub the browser launch; six tests cover `javascript:`,
+  `file:`, `data:`, malformed strings, `http://`, and `https://`
+  inputs.
+
 ## [1.0.0] — 2026-06-13
 
 The first stable release. All v1 features from `PLAN.md` are
