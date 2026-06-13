@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use gh_monitor_config::schema::WindowPosition;
 use gh_monitor_config::Config;
-use gh_monitor_gh::{rate_limit_banner, Auth, ClientError, PollConfig, PollItem, Poller, RawEvent};
+use gh_monitor_gh::{rate_limit_banner, Auth, ClientError, PollConfig, Poller, RawEvent};
 use gh_monitor_timeline::snapshot::SnapshotDiff;
 use gh_monitor_timeline::{
     compress, diff, group_by_repo, CompressionConfig, NodeId, TimelineSnapshot,
@@ -23,9 +23,12 @@ use tracing::{error, warn};
 
 use crate::animation::NodeAnim;
 use crate::canvas::TimelineProgram;
+use crate::context_menu::{ContextMenu, MenuItem};
 use crate::demo;
+use crate::doctor::CheckResult;
 use crate::link::open_url;
 use crate::overlay::OverlayState;
+use crate::settings::{SettingsField, SettingsForm};
 use crate::tray::TrayAction;
 
 /// The settings passed in from `main.rs` to construct the app.
@@ -71,6 +74,31 @@ pub struct State {
     /// `remaining_secs` to render the countdown and the frame tick
     /// subscription drains due scripted events.
     pub demo: Option<demo::DemoState>,
+    /// `true` when the in-pane settings panel is showing in place of
+    /// the timeline. Toggled by `TrayAction::OpenSettings`,
+    /// `Message::OpenSettings`, and the right-click context menu's
+    /// "Settings…" item.
+    pub show_settings: bool,
+    /// The right-click context menu, if open. `None` when dismissed.
+    pub context_menu: Option<ContextMenu>,
+    /// The settings form's working copy. Mirrors `state.config` while
+    /// the panel is closed so a Cancel discards user edits.
+    pub settings_form: SettingsForm,
+    /// Last validation error from the settings form's `to_config`. Shown
+    /// in the panel until the next edit or successful save.
+    pub settings_error: Option<String>,
+    /// `true` when the in-app Doctor diagnostics page is shown in
+    /// place of the timeline. Toggled by the context menu's "Doctor…"
+    /// item.
+    pub show_doctor: bool,
+    /// `true` when the About page is shown in place of the timeline.
+    /// Toggled by the context menu's "About" item.
+    pub show_about: bool,
+    /// Doctor check results, populated when the user opens the
+    /// Doctor page. Empty until the async check has run.
+    pub doctor_results: Vec<CheckResult>,
+    /// `true` while a doctor check is in flight.
+    pub doctor_running: bool,
 }
 
 /// Per-source poll status, in the order the sources were last updated.
@@ -258,6 +286,37 @@ pub enum Message {
     /// active and otherwise no-ops. A future per-frame redraw
     /// could be wired here without needing a separate subscription.
     FrameTick(Instant),
+    /// The user right-clicked the canvas. Opens a context menu at the
+    /// given canvas-local position.
+    OpenContextMenu(iced::Point),
+    /// The user clicked a context menu item. The handler dismisses the
+    /// menu and acts on the item.
+    ContextMenuItem(MenuItem),
+    /// The user clicked outside the context menu (or pressed Escape).
+    /// Closes the menu without acting on any item.
+    DismissContextMenu,
+    /// The cursor moved over the canvas. Used to highlight the
+    /// hovered context menu item.
+    ContextMenuHover(Option<usize>),
+    /// Toggle the in-app Doctor diagnostics page.
+    ToggleDoctor,
+    /// Toggle the About page.
+    ToggleAbout,
+    /// Doctor check finished; the results are ready to render.
+    DoctorResults(Vec<crate::doctor::CheckResult>),
+    /// Open the in-pane settings panel. Fired by the tray menu and the
+    /// right-click context menu's "Settings…" item.
+    OpenSettings,
+    /// User typed into one of the settings form's fields. The new
+    /// value is stored verbatim; parsing / validation happens on Save.
+    SettingsFieldChanged(SettingsField, String),
+    /// Save the settings form: validate, write to disk, exit the panel.
+    SettingsSubmit,
+    /// Discard the settings form's edits and return to the timeline.
+    SettingsCancel,
+    /// Reset the settings form to the default config and stay in the
+    /// panel.
+    SettingsReset,
 }
 
 /// Run the application. Blocks until the window is closed.
@@ -303,6 +362,14 @@ pub fn run(settings: AppSettings) -> anyhow::Result<()> {
                 program: TimelineProgram::new(),
                 window_id: None,
                 demo: None,
+                show_settings: false,
+                context_menu: None,
+                settings_form: SettingsForm::from_config(&initial),
+                settings_error: None,
+                show_doctor: false,
+                show_about: false,
+                doctor_results: Vec::new(),
+                doctor_running: false,
             };
             (state, Task::none())
         },
@@ -412,17 +479,127 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             None => Task::none(),
         },
         Message::Escape => {
+            if state.show_settings {
+                cancel_settings(state);
+                return Task::none();
+            }
+            // Escape dismisses the context menu first, then the
+            // doctor/about page, and only then quits.
+            if state.context_menu.is_some() {
+                state.context_menu = None;
+                sync_program(state);
+                return Task::none();
+            }
+            if state.show_doctor {
+                state.show_doctor = false;
+                state.doctor_running = false;
+                sync_program(state);
+                return Task::none();
+            }
+            if state.show_about {
+                state.show_about = false;
+                sync_program(state);
+                return Task::none();
+            }
             if state.config_save_pending {
                 flush_pending_position_save(state);
             }
             iced::exit()
         }
-        Message::Refresh => Task::none(),
+        Message::Refresh => {
+            request_force_poll();
+            Task::none()
+        }
         Message::TrayAction(TrayAction::Quit) => {
             if state.config_save_pending {
                 flush_pending_position_save(state);
             }
             iced::exit()
+        }
+        Message::TrayAction(TrayAction::OpenSettings) => {
+            open_settings(state);
+            Task::none()
+        }
+        Message::OpenContextMenu(p) => {
+            state.context_menu = Some(ContextMenu::new(p));
+            sync_program(state);
+            Task::none()
+        }
+        Message::ContextMenuItem(item) => {
+            state.context_menu = None;
+            match item {
+                MenuItem::Settings => {
+                    open_settings(state);
+                }
+                MenuItem::ShowHide => {
+                    let id = state.window_id;
+                    if let Some(id) = id {
+                        state.hidden = !state.hidden;
+                        if state.hidden {
+                            return window::set_mode(id, Mode::Hidden);
+                        } else {
+                            return window::set_mode(id, Mode::Windowed);
+                        }
+                    }
+                }
+                MenuItem::RefreshNow => {
+                    request_force_poll();
+                }
+                MenuItem::Doctor => {
+                    state.show_doctor = !state.show_doctor;
+                    let needs_run = state.show_doctor && state.doctor_results.is_empty();
+                    state.doctor_running = state.show_doctor;
+                    sync_program(state);
+                    if needs_run {
+                        return run_doctor_async();
+                    }
+                }
+                MenuItem::About => {
+                    state.show_about = !state.show_about;
+                    sync_program(state);
+                }
+                MenuItem::Quit => {
+                    if state.config_save_pending {
+                        flush_pending_position_save(state);
+                    }
+                    return iced::exit();
+                }
+                MenuItem::Separator => {}
+            }
+            Task::none()
+        }
+        Message::DismissContextMenu => {
+            state.context_menu = None;
+            sync_program(state);
+            Task::none()
+        }
+        Message::ContextMenuHover(idx) => {
+            if let Some(menu) = state.context_menu.as_mut() {
+                menu.selected = idx;
+            }
+            Task::none()
+        }
+        Message::ToggleDoctor => {
+            state.show_doctor = !state.show_doctor;
+            let needs_run = state.show_doctor && state.doctor_results.is_empty();
+            state.doctor_running = state.show_doctor;
+            sync_program(state);
+            if needs_run {
+                run_doctor_async()
+            } else {
+                Task::none()
+            }
+        }
+        Message::ToggleAbout => {
+            state.show_about = !state.show_about;
+            sync_program(state);
+            Task::none()
+        }
+        Message::DoctorResults(results) => {
+            state.doctor_results = results;
+            state.doctor_running = false;
+            sync_program(state);
+            Task::none()
         }
         Message::TrayAction(TrayAction::ToggleVisible) => {
             let id = state.window_id;
@@ -475,7 +652,69 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             sync_program(state);
             Task::none()
         }
+        Message::OpenSettings => {
+            open_settings(state);
+            Task::none()
+        }
+        Message::SettingsFieldChanged(field, value) => {
+            if state.show_settings {
+                state.settings_form.update_field(field, value);
+                state.settings_error = None;
+            }
+            Task::none()
+        }
+        Message::SettingsSubmit => submit_settings(state),
+        Message::SettingsCancel => {
+            cancel_settings(state);
+            Task::none()
+        }
+        Message::SettingsReset => {
+            if state.show_settings {
+                state.settings_form = SettingsForm::from_default();
+                state.settings_error = None;
+            }
+            Task::none()
+        }
     }
+}
+
+/// Open the in-pane settings panel. Always rebuilds the form from the
+/// current config so the user sees their saved values, not a stale
+/// working copy from a previous open.
+fn open_settings(state: &mut State) {
+    state.show_settings = true;
+    state.settings_form = SettingsForm::from_config(&state.config);
+    state.settings_error = None;
+}
+
+/// Cancel: discard form edits, hide the panel, leave the on-disk
+/// config untouched.
+fn cancel_settings(state: &mut State) {
+    state.show_settings = false;
+    state.settings_form = SettingsForm::from_config(&state.config);
+    state.settings_error = None;
+}
+
+/// Save: validate the form, persist to disk, apply to in-memory state,
+/// exit the panel. On validation failure the panel stays open and the
+/// error is shown.
+fn submit_settings(state: &mut State) -> Task<Message> {
+    let new_cfg = match state.settings_form.to_config(&state.config) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            state.settings_error = Some(e);
+            return Task::none();
+        }
+    };
+    if let Err(e) = crate::config_io::save_config(&new_cfg) {
+        state.settings_error = Some(format!("failed to write config: {e}"));
+        return Task::none();
+    }
+    state.config = new_cfg;
+    state.show_settings = false;
+    state.settings_error = None;
+    let _ = install_poller_if_configured(&state.config);
+    Task::none()
 }
 
 /// The minimum interval between two config-on-disk writes triggered by
@@ -501,7 +740,53 @@ fn flush_pending_position_save(state: &mut State) {
     }
 }
 
+/// Fire a one-shot "poll now" signal. Consumed by the poller
+/// subscription's loop via `FORCE_POLL.notified()`. Multiple clicks
+/// in quick succession collapse into a single extra poll, which is
+/// the correct behaviour — the loop only needs to know "as soon as
+/// you're not busy, re-poll".
+fn request_force_poll() {
+    FORCE_POLL.notify_one();
+}
+
+#[cfg(test)]
+fn test_run_doctor_async_is_noop_task() {
+    let _ = run_doctor_async();
+}
+
+/// Kick off the doctor checks asynchronously and post the results
+/// back as a `Message::DoctorResults`. The blocking task exists
+/// because `doctor::run_all` is sync (it builds its own short-lived
+/// tokio runtime for the network checks); running it on Iced's
+/// tokio runtime thread would either block the runtime or panic
+/// on a nested `block_on`.
+fn run_doctor_async() -> Task<Message> {
+    let path = crate::config_io::config_path();
+    Task::perform(
+        async move {
+            let join = tokio::task::spawn_blocking(move || crate::doctor::run_all(&path)).await;
+            match join {
+                Ok(Ok(results)) => results,
+                Ok(Err(e)) => vec![CheckResult::fail("doctor", format!("{e}"))],
+                Err(e) => vec![CheckResult::fail(
+                    "doctor",
+                    format!("blocking task failed: {e}"),
+                )],
+            }
+        },
+        Message::DoctorResults,
+    )
+}
+
 fn view(state: &State) -> Element<'_, Message, Theme, iced::Renderer> {
+    if state.show_settings {
+        settings_view(state)
+    } else {
+        timeline_view(state)
+    }
+}
+
+fn timeline_view(state: &State) -> Element<'_, Message, Theme, iced::Renderer> {
     let canvas = Canvas::new(&state.program)
         .width(iced::Length::Fill)
         .height(iced::Length::Fill);
@@ -514,6 +799,98 @@ fn view(state: &State) -> Element<'_, Message, Theme, iced::Renderer> {
         .on_enter(Message::HoverEntered)
         .on_exit(Message::HoverLeft);
     area.into()
+}
+
+fn settings_view(state: &State) -> Element<'_, Message, Theme, iced::Renderer> {
+    use iced::widget::{button, checkbox, column, radio, row, text, text_input, Space};
+
+    let title = text("Settings").size(18.0);
+    let pat = text_input("Personal access token", state.settings_form.pat())
+        .on_input(|s| Message::SettingsFieldChanged(SettingsField::Pat, s))
+        .secure(true)
+        .size(13.0);
+    let auth_label = text("Auth source").size(12.0);
+    let pat_radio = radio(
+        "PAT",
+        gh_monitor_config::schema::AuthSource::Pat,
+        Some(state.settings_form.auth_source()),
+        |v| {
+            let s = match v {
+                gh_monitor_config::schema::AuthSource::Pat => "pat",
+                gh_monitor_config::schema::AuthSource::Gh => "gh",
+            };
+            Message::SettingsFieldChanged(SettingsField::AuthSource, s.to_string())
+        },
+    )
+    .size(13.0);
+    let gh_radio = radio(
+        "gh",
+        gh_monitor_config::schema::AuthSource::Gh,
+        Some(state.settings_form.auth_source()),
+        |v| {
+            let s = match v {
+                gh_monitor_config::schema::AuthSource::Pat => "pat",
+                gh_monitor_config::schema::AuthSource::Gh => "gh",
+            };
+            Message::SettingsFieldChanged(SettingsField::AuthSource, s.to_string())
+        },
+    )
+    .size(13.0);
+    let username = text_input("GitHub username", state.settings_form.username())
+        .on_input(|s| Message::SettingsFieldChanged(SettingsField::Username, s))
+        .size(13.0);
+    let orgs = text_input("orgs (comma-separated)", state.settings_form.orgs())
+        .on_input(|s| Message::SettingsFieldChanged(SettingsField::Orgs, s))
+        .size(13.0);
+    let repos = text_input(
+        "repos (owner/name, comma-separated)",
+        state.settings_form.repos(),
+    )
+    .on_input(|s| Message::SettingsFieldChanged(SettingsField::Repos, s))
+    .size(13.0);
+    let poll = text_input(
+        "poll interval (seconds)",
+        state.settings_form.poll_interval_secs(),
+    )
+    .on_input(|s| Message::SettingsFieldChanged(SettingsField::PollInterval, s))
+    .size(13.0);
+    let notifications = checkbox(state.settings_form.notifications_enabled())
+        .label("Show system notifications on new activity")
+        .on_toggle(|b| {
+            Message::SettingsFieldChanged(
+                SettingsField::Notifications,
+                if b { "true" } else { "false" }.to_string(),
+            )
+        });
+
+    let save_btn = button("Save").on_press(Message::SettingsSubmit);
+    let cancel_btn = button("Cancel").on_press(Message::SettingsCancel);
+    let reset_btn = button("Reset to defaults").on_press(Message::SettingsReset);
+
+    let error_line: Element<'_, Message, Theme, iced::Renderer> = match &state.settings_error {
+        Some(e) => text(e).size(12.0).into(),
+        None => Space::new().height(0).into(),
+    };
+
+    column![
+        title,
+        Space::new().height(8),
+        pat,
+        auth_label,
+        row![pat_radio, gh_radio].spacing(12.0),
+        username,
+        orgs,
+        repos,
+        poll,
+        notifications,
+        Space::new().height(4),
+        error_line,
+        Space::new().height(4),
+        row![save_btn, cancel_btn, reset_btn].spacing(8.0),
+    ]
+    .spacing(6.0)
+    .padding(12.0)
+    .into()
 }
 
 fn subscription(_state: &State) -> Subscription<Message> {
@@ -662,32 +1039,54 @@ fn poll_subscription() -> Subscription<Message> {
                     // tick. Either way, nothing more to do.
                     return;
                 };
+                let interval = cfg.interval;
                 let poller = match Poller::new(auth, cfg) {
                     Ok(p) => p,
                     Err(e) => {
                         warn!(error = %e, "failed to build poller");
                         let msg = Message::PolledCycle {
                             events: Vec::new(),
-                            // `Poller::new` returns `PollError::Auth(_)` for
-                            // "no sources configured", which the
-                            // poller's own run loop also maps to
-                            // `ClientError::Unauthorized`. Use the same
-                            // mapping here so the GUI sees a single
-                            // error type.
                             errors: vec![("poller", ClientError::Unauthorized(e.to_string()))],
                         };
                         let _ = output.send(msg).await;
                         return;
                     }
                 };
-                let (fut, mut rx) = poller.into_run();
-                tokio::spawn(fut);
-                while let Some(item) = rx.recv().await {
-                    let msg = match item {
-                        PollItem::Cycle { events, errors } => {
-                            Message::PolledCycle { events, errors }
+                let mut ticker = tokio::time::interval(interval);
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    // `Notify::notified()` returns a fused future: it
+                    // resolves on the next call to `notify_one` and
+                    // then never again, so we re-create it every
+                    // iteration to wait for the next signal.
+                    let notified = FORCE_POLL.notified();
+                    tokio::pin!(notified);
+                    let tick = ticker.tick();
+                    tokio::pin!(tick);
+                    let _reason: &'static str;
+                    tokio::select! {
+                        _ = &mut tick => { _reason = "interval"; }
+                        _ = notified => { _reason = "forced"; }
+                    }
+                    let outcome = poller.poll_once().await;
+                    let mut events_out: Vec<(&'static str, Vec<RawEvent>)> =
+                        Vec::with_capacity(outcome.sources.len());
+                    let mut errors_out: Vec<(&'static str, ClientError)> = Vec::new();
+                    for source in outcome.sources {
+                        for err in source.errors {
+                            let client_err = match err {
+                                gh_monitor_gh::PollError::Client(c) => c,
+                                gh_monitor_gh::PollError::Auth(s) => ClientError::Unauthorized(s),
+                            };
+                            errors_out.push((source.source, client_err));
                         }
+                        events_out.push((source.source, source.events));
+                    }
+                    let msg = Message::PolledCycle {
+                        events: events_out,
+                        errors: errors_out,
                     };
+                    let _ = _reason; // kept for future log use
                     if output.send(msg).await.is_err() {
                         break;
                     }
@@ -721,6 +1120,13 @@ fn tray_subscription() -> Subscription<Message> {
 }
 
 static POLL_BUILD: Mutex<Option<(Auth, PollConfig)>> = Mutex::new(None);
+
+/// One-shot wake-up for the poller subscription. `notify_one()`
+/// posts a single permit; the subscription's `notified().await`
+/// consumes it. Storing it in a `LazyLock` keeps the construction
+/// off the hot path.
+static FORCE_POLL: std::sync::LazyLock<tokio::sync::Notify> =
+    std::sync::LazyLock::new(tokio::sync::Notify::new);
 
 /// Construction-time error recorded by `install_poller_if_configured`
 /// (config validation failure, malformed repo format, etc.). The
@@ -958,15 +1364,17 @@ mod tests {
     }
 
     fn test_state() -> State {
+        let config = Config {
+            pat: "ghp_test".to_string(),
+            username: Some("octocat".to_string()),
+            orgs: vec!["rust-lang".to_string()],
+            repos: vec![],
+            poll_interval_secs: 30,
+            ..Config::default()
+        };
+        let form = SettingsForm::from_config(&config);
         State {
-            config: Config {
-                pat: "ghp_test".to_string(),
-                username: Some("octocat".to_string()),
-                orgs: vec!["rust-lang".to_string()],
-                repos: vec![],
-                poll_interval_secs: 30,
-                window_position: None,
-            },
+            config,
             snapshot: TimelineSnapshot::default(),
             anims: HashMap::new(),
             overlay: OverlayState::Active,
@@ -979,6 +1387,14 @@ mod tests {
             program: TimelineProgram::new(),
             window_id: None,
             demo: None,
+            context_menu: None,
+            show_doctor: false,
+            show_about: false,
+            doctor_results: Vec::new(),
+            doctor_running: false,
+            show_settings: false,
+            settings_form: form,
+            settings_error: None,
         }
     }
 
@@ -1145,6 +1561,7 @@ mod tests {
             repos: vec![],
             poll_interval_secs: 30,
             window_position: None,
+            ..Config::default()
         }
     }
 
