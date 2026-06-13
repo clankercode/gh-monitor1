@@ -6,6 +6,58 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-06-13
+
+### Fixed
+- **Per-cycle poll application.** The v0.3.0 poller emitted one
+  message per source and `apply_events` rebuilt the snapshot from
+  each batch, so the last source polled in a cycle "won" and the
+  previous sources' nodes were animated out — the timeline flickered
+  to a single source every cycle. The poller now emits a single
+  `PollItem::Cycle` per tick carrying every source's batch plus its
+  errors, and the app applies the flattened events in one shot.
+- **Debounced window-position saves.** `Message::WindowMoved` fired
+  ~60×/sec during a drag; the old handler wrote the config file on
+  every event. A drag did hundreds of overlapping disk writes. Now
+  writes are throttled to one per 500 ms; the in-memory config is
+  always up to date and the next eligible save picks up the latest
+  position. A `config_save_pending` flag is flushed synchronously
+  on `Message::Escape` and `TrayAction::Quit` so the user's last
+  move is never lost.
+- **Atomic config writes.** `save_config` previously truncated and
+  wrote the config file in place, so a kill mid-write would corrupt
+  the file and `load_config` would fail on next start. The helper
+  now writes to `<path>.toml.tmp` and renames over the target;
+  `rename` is atomic on POSIX and `MoveFileEx(REPLACE_EXISTING)` on
+  Windows, so a kill mid-write leaves the previous good file
+  intact.
+
+### Changed
+- `PollItem` is now a single-variant enum:
+  `Cycle { events: Vec<(&'static str, Vec<RawEvent>)>, errors: Vec<(&'static str, String)> }`.
+  The `Events` / `Error` / `AuthError` variants are gone — auth and
+  transient errors are both reported in `errors` (the message string
+  tells them apart) and the GUI formats them the same way in the
+  status banner.
+- `Message` in `gh_monitor_app` is now `PolledCycle { events, errors }`
+  instead of three variants (`Polled` / `PollError` / `AuthError`).
+- `Config` save is now done through a private `save_config_to(path,
+  cfg)` helper. `save_config` is a thin wrapper that uses
+  `config_path()`. The helper is `pub(crate)` so tests can drive
+  the write into a temp dir.
+
+### Tests
+- 10 new unit tests (`save_config_to_writes_final_file_atomically`,
+  `save_config_to_overwrites_existing_file`,
+  `save_config_to_creates_parent_dirs`, three
+  `should_save_position_*` cases,
+  `polled_cycle_applies_all_sources_in_one_shot`,
+  `polled_cycle_records_per_source_errors`,
+  `window_moved_first_event_records_pending_false`,
+  `window_moved_within_debounce_window_marks_pending`) and a
+  renamed/rewritten `run_emits_one_cycle_per_tick`. Workspace total
+  is now 123 tests.
+
 ## [0.3.0] — 2026-06-13
 
 ### Added
@@ -104,7 +156,8 @@ project adheres to [Semantic Versioning](https://semver.org/).
   tests for the timeline grouping, and proptests for the humanize
   function.
 
-[Unreleased]: https://github.com/clankercode/gh-monitor1/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/clankercode/gh-monitor1/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/clankercode/gh-monitor1/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/clankercode/gh-monitor1/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/clankercode/gh-monitor1/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/clankercode/gh-monitor1/compare/v0.1.0...v0.1.1
