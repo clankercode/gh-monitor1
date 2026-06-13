@@ -23,6 +23,7 @@ use tracing::{error, warn};
 
 use crate::animation::NodeAnim;
 use crate::canvas::TimelineProgram;
+use crate::demo;
 use crate::link::open_url;
 use crate::overlay::OverlayState;
 use crate::tray::TrayAction;
@@ -64,6 +65,12 @@ pub struct State {
     pub last_poll_at: Option<Instant>,
     pub program: TimelineProgram,
     pub window_id: Option<Id>,
+    /// Active demo state, if any. `Some` between the moment the user
+    /// clicks the "🎬 Demo" button and the moment the
+    /// `DEMO_TOTAL_SECS` window elapses; the canvas reads
+    /// `remaining_secs` to render the countdown and the frame tick
+    /// subscription drains due scripted events.
+    pub demo: Option<demo::DemoState>,
 }
 
 /// Per-source poll status, in the order the sources were last updated.
@@ -242,6 +249,15 @@ pub enum Message {
     Refresh,
     /// Tray menu fired an action.
     TrayAction(TrayAction),
+    /// User clicked the "🎬 Demo" button on the canvas. Replaces
+    /// any in-flight demo: the timeline is cleared and a fresh
+    /// `DemoState` is started.
+    StartDemo,
+    /// 100ms frame tick from the `iced::time::every` subscription.
+    /// The handler drains due scripted events when a demo is
+    /// active and otherwise no-ops. A future per-frame redraw
+    /// could be wired here without needing a separate subscription.
+    FrameTick(Instant),
 }
 
 /// Run the application. Blocks until the window is closed.
@@ -286,6 +302,7 @@ pub fn run(settings: AppSettings) -> anyhow::Result<()> {
                 last_poll_at: None,
                 program: TimelineProgram::new(),
                 window_id: None,
+                demo: None,
             };
             (state, Task::none())
         },
@@ -420,6 +437,44 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                 Task::none()
             }
         }
+        Message::StartDemo => {
+            // Reset the timeline and start a fresh demo. Subsequent
+            // clicks re-run the script from a clean slate, so the
+            // user can replay the demo as many times as they like.
+            // `apply_events` is intentionally NOT called here — the
+            // first scripted event fires at t=1.0s via the
+            // `Message::FrameTick` handler.
+            state.snapshot = TimelineSnapshot::default();
+            state.anims.clear();
+            state.demo = Some(demo::DemoState::new());
+            sync_program(state);
+            Task::none()
+        }
+        Message::FrameTick(now) => {
+            // Drain due events out of the demo first so we don't
+            // hold a mutable borrow on `state.demo` across the
+            // `apply_events` call (which also takes `&mut state`).
+            let (events, complete) = {
+                let Some(active) = state.demo.as_mut() else {
+                    return Task::none();
+                };
+                let events = active.drain_due(now);
+                let complete = active.is_complete(now);
+                (events, complete)
+            };
+            if !events.is_empty() {
+                apply_events(state, events);
+            }
+            if complete {
+                // Window elapsed — drop the demo and re-sync the
+                // canvas so the indicator and `demo_remaining_secs`
+                // clear. The final snapshot (with all the demo
+                // nodes faded in) stays on screen.
+                state.demo = None;
+            }
+            sync_program(state);
+            Task::none()
+        }
     }
 }
 
@@ -463,7 +518,11 @@ fn view(state: &State) -> Element<'_, Message, Theme, iced::Renderer> {
 
 fn subscription(_state: &State) -> Subscription<Message> {
     // Animations are read at draw time via `Animation::interpolate_with`,
-    // so no per-frame tick subscription is needed.
+    // so no per-frame redraw subscription is needed. The frame tick
+    // below fires every 100ms and is what the demo scheduler uses to
+    // drain due scripted events; it is a no-op when no demo is
+    // active, so the subscription's baseline cost is a single
+    // `Instant::now()` every 100ms.
     let kb = event::listen_with(|e, status, _id| {
         if status == EventStatus::Ignored {
             if let Event::Keyboard(keyboard::Event::KeyPressed { key, .. }) = e {
@@ -485,9 +544,20 @@ fn subscription(_state: &State) -> Subscription<Message> {
             None
         }
     });
+    let frame = frame_subscription();
     let poll = poll_subscription();
     let tray = tray_subscription();
-    Subscription::batch([kb, poll, win, move_sub, tray])
+    Subscription::batch([kb, frame, poll, win, move_sub, tray])
+}
+
+/// 100ms frame tick. The handler for `Message::FrameTick` drains
+/// due demo events when one is active; otherwise the message is a
+/// no-op. The 100ms cadence is fine for the demo (events fire on
+/// whole-second boundaries, so we get up to ten checks per
+/// scheduled event). A future per-frame redraw could share this
+/// subscription without any API change.
+fn frame_subscription() -> Subscription<Message> {
+    iced::time::every(Duration::from_millis(100)).map(Message::FrameTick)
 }
 
 fn theme(_state: &State) -> Option<Theme> {
@@ -540,6 +610,10 @@ fn sync_program(state: &mut State) {
     state.program.set_anims(state.anims.clone());
     state.program.needs_setup = state.config.pat.trim().is_empty();
     state.program.status = format_poll_status(&state.poll_status);
+    state.program.demo_remaining_secs = state
+        .demo
+        .as_ref()
+        .map(|d| d.remaining_secs(Instant::now()));
 }
 
 /// Deduplicate events by their GitHub `id`. The first occurrence wins.
@@ -695,7 +769,7 @@ pub fn install_poller_if_configured(initial: &Config) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{Duration, Utc};
+    use chrono::{Duration as ChronoDuration, Utc};
     use gh_monitor_gh::{EventKind, RawEvent};
 
     /// Serialises the three `install_poller_*` tests so the shared
@@ -713,7 +787,7 @@ mod tests {
             id: id.to_string(),
             kind,
             repo_full_name: repo.to_string(),
-            created_at: now - Duration::seconds(secs_ago),
+            created_at: now - ChronoDuration::seconds(secs_ago),
             title: None,
             url: None,
         }
@@ -904,6 +978,7 @@ mod tests {
             last_poll_at: None,
             program: TimelineProgram::new(),
             window_id: None,
+            demo: None,
         }
     }
 
@@ -1134,5 +1209,127 @@ mod tests {
         );
         // Drain POLL_BUILD so we don't leak state to the next test.
         let _ = POLL_BUILD.lock().ok().map(|mut g| g.take());
+    }
+
+    // === Demo mode tests =========================================
+
+    #[test]
+    fn start_demo_clears_snapshot_and_installs_state() {
+        // A user-visible start: a stale snapshot must be wiped and
+        // `state.demo` must be populated. We assert the post-state
+        // without going through Iced.
+        let mut s = test_state();
+        // Pre-populate the snapshot with a node so we can prove the
+        // clear works.
+        let dirty = RawEvent::for_test(
+            "old/repo".to_string(),
+            EventKind::PrOpened,
+            chrono::Utc::now(),
+        );
+        apply_events(&mut s, vec![dirty]);
+        assert!(
+            !s.snapshot.nodes.is_empty(),
+            "precondition: snapshot is dirty"
+        );
+
+        let _ = update(&mut s, Message::StartDemo);
+        assert!(
+            s.snapshot.nodes.is_empty(),
+            "StartDemo must clear the snapshot"
+        );
+        assert!(s.anims.is_empty(), "StartDemo must clear the animations");
+        let demo = s.demo.as_ref().expect("StartDemo must install a DemoState");
+        assert_eq!(demo.len(), 10, "demo script has 10 scheduled events");
+    }
+
+    #[test]
+    fn demo_tick_applies_due_events() {
+        // User spec: feed fake times into the FrameTick handler and
+        // assert the snapshot updates. We use `new_at` so the test
+        // owns the demo's `started_at` instant and can pin the
+        // events at exact wall-clock offsets.
+        let mut s = test_state();
+        let t0 = Instant::now();
+        s.demo = Some(crate::demo::DemoState::new_at(t0));
+
+        // Tick at t=0.5s — the first scheduled event is at t=1.0s,
+        // so nothing should fire.
+        let _ = update(&mut s, Message::FrameTick(t0 + Duration::from_millis(500)));
+        assert!(
+            s.snapshot.nodes.is_empty(),
+            "no events should fire before t=1.0s, got nodes: {:?}",
+            s.snapshot.nodes
+        );
+
+        // Tick at t=1.0s — first event fires; rust-lang/rust node
+        // appears in the snapshot.
+        let _ = update(&mut s, Message::FrameTick(t0 + Duration::from_secs(1)));
+        let repos: Vec<&str> = s.snapshot.nodes.iter().map(|n| n.repo.as_str()).collect();
+        assert!(
+            repos.contains(&"rust-lang/rust"),
+            "expected rust-lang/rust after first demo event, got {repos:?}"
+        );
+        assert_eq!(
+            s.snapshot.nodes.len(),
+            1,
+            "only one demo event has fired, got {} nodes",
+            s.snapshot.nodes.len()
+        );
+
+        // Tick at t=4.0s — the first three PRs (rust-lang/rust,
+        // tokio-rs/tokio, two more rust-lang/rust pulses) have
+        // fired. The rust-lang/rust node should now have count=3
+        // for PrOpened; tokio-rs/tokio should have count=1.
+        let _ = update(&mut s, Message::FrameTick(t0 + Duration::from_secs(4)));
+        let repos: Vec<&str> = s.snapshot.nodes.iter().map(|n| n.repo.as_str()).collect();
+        assert!(
+            repos.contains(&"rust-lang/rust"),
+            "expected rust-lang/rust in snapshot, got {repos:?}"
+        );
+        assert!(
+            repos.contains(&"tokio-rs/tokio"),
+            "expected tokio-rs/tokio in snapshot, got {repos:?}"
+        );
+        // Animation state must have been created for the new node.
+        assert!(
+            !s.anims.is_empty(),
+            "FrameTick should trigger animation inserts"
+        );
+    }
+
+    #[test]
+    fn demo_state_clears_after_completion() {
+        // After `DEMO_TOTAL_SECS` the demo state must be dropped and
+        // the canvas's `demo_remaining_secs` must clear, but the
+        // final snapshot (the timeline with all the demo nodes)
+        // stays visible.
+        let mut s = test_state();
+        let t0 = Instant::now();
+        s.demo = Some(crate::demo::DemoState::new_at(t0));
+
+        // Tick past the demo window.
+        let far = t0 + Duration::from_secs(crate::demo::DEMO_TOTAL_SECS) + Duration::from_secs(5);
+        let _ = update(&mut s, Message::FrameTick(far));
+        assert!(
+            s.demo.is_none(),
+            "demo state must be cleared after the window elapses"
+        );
+        // The canvas's remaining-seconds counter must clear too, so
+        // the indicator disappears on the next draw.
+        assert!(
+            s.program.demo_remaining_secs.is_none(),
+            "demo_remaining_secs on the canvas program must be None after completion"
+        );
+    }
+
+    #[test]
+    fn frame_tick_is_noop_when_no_demo_active() {
+        // A FrameTick without a demo must not touch the snapshot or
+        // any other state. This is the steady-state path the
+        // subscription runs at 10Hz for the entire app lifetime.
+        let mut s = test_state();
+        let before_nodes = s.snapshot.nodes.len();
+        let _ = update(&mut s, Message::FrameTick(Instant::now()));
+        assert_eq!(s.snapshot.nodes.len(), before_nodes);
     }
 }
