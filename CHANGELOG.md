@@ -6,6 +6,23 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.0.0] — 2026-06-13
+
+The first stable release. All v1 features from `PLAN.md` are
+implemented and tested. The project is production-ready.
+
+### Changed
+- Workspace `version` bumped to `1.0.0`. `gh-monitor --version` and
+  the User-Agent header now report `1.0.0` (was `0.1.0` since the
+  first tag).
+- `Cargo.toml` `repository` field now points at
+  `clankercode/gh-monitor1` (the actual GitHub remote).
+- `docs/architecture.md` rewritten to match the v0.3.0+ data flow
+  (`Message::PolledCycle`, `PollItem::Cycle`, debounced position
+  saves, single-instance lock).
+- README's MSRV is now `1.89` (was `1.81`, bumped in v0.3.2 for
+  `std::fs::File::try_lock`). Pre-alpha badge removed.
+
 ## [0.3.2] — 2026-06-13
 
 ### Fixed

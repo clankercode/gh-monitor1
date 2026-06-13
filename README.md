@@ -8,7 +8,8 @@ PR/issue/release in your browser.
 
 Built with Rust + Iced. One binary per platform. No Electron, no Tauri.
 
-![status](https://img.shields.io/badge/status-pre--alpha-orange)
+![status](https://img.shields.io/badge/status-stable-brightgreen)
+![version](https://img.shields.io/badge/version-1.0.0-blue)
 ![build](https://github.com/clankercode/gh-monitor1/actions/workflows/ci.yml/badge.svg)
 
 ## Features
@@ -33,13 +34,12 @@ Built with Rust + Iced. One binary per platform. No Electron, no Tauri.
 
 ## Screenshots
 
-> *Coming soon — the app is in pre-alpha. Once you have a config and a PAT,
-> the overlay looks like a small floating panel showing your activity
-> timeline.*
+> *Coming soon — once you have a config and a PAT, the overlay looks
+> like a small floating panel showing your activity timeline.*
 
 ## Quick start (dev)
 
-Requires Rust 1.81+ and `just`. On Linux you also need GTK 3, libxdo, and
+Requires Rust 1.89+ and `just`. On Linux you also need GTK 3, libxdo, and
 libappindicator for the tray icon. See [Iced's prerequisites](https://github.com/iced-rs/iced#prerequisites)
 plus `libgtk-3-dev libxdo-dev libayatana-appindicator3-dev`.
 
@@ -174,16 +174,25 @@ The project follows the conventions in [`AGENTS.md`](AGENTS.md).
 
 ## Status
 
-Pre-alpha. Core functionality is implemented (transparent overlay, hover
-passthrough, click+drag, deep links, animations, tray icon, polling).
-What's still in progress:
+Stable as of v1.0.0. Core functionality is implemented and tested:
 
-- Window-position persistence on move (currently restored on boot only)
-- GUI settings panel (use the CLI for now: `gh-monitor config edit`,
-  or `gh-monitor doctor` to verify your environment)
-- Headless Iced smoke test (deferred — needs an offscreen render target)
+- Transparent overlay with hover-to-capture mouse passthrough
+- Click+drag to move (position persists across restarts)
+- Animated timeline (fade-in on insert, pulse on update)
+- Five event types (PR opened/merged, issue opened, release, new repo)
+- Deep links to PRs/issues/releases
+- System tray with Show / Hide and Quit
+- PAT-based auth with TOML config
+- CLI: `init`, `config {path, print, edit, validate}`, `doctor`
+- Per-source polling status with rate-limit-reset awareness
+- Strict single-instance lock and atomic config writes
+- Cross-platform builds (Linux, macOS, Windows) with automated releases
 
-See [`PLAN.md`](PLAN.md) for the full plan and open questions.
+Post-v1.0 backlog (see [`PLAN.md`](PLAN.md)):
+
+- A real GUI settings panel (currently CLI-only)
+- App icon assets (currently procedurally generated)
+- Headless Iced smoke test (currently no display-server tests)
 
 ## License
 
