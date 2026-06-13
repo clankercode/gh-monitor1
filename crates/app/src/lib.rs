@@ -8,6 +8,7 @@ mod animation;
 mod app;
 mod canvas;
 pub mod config_io;
+pub mod doctor;
 mod link;
 mod overlay;
 mod paint;

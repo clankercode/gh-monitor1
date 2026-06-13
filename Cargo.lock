@@ -1606,6 +1606,7 @@ dependencies = [
  "libc",
  "open",
  "proptest",
+ "reqwest",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
