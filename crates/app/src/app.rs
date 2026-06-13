@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use gh_monitor_config::schema::WindowPosition;
 use gh_monitor_config::Config;
-use gh_monitor_gh::{Auth, PollConfig, PollItem, Poller, RawEvent};
+use gh_monitor_gh::{rate_limit_banner, Auth, ClientError, PollConfig, PollItem, Poller, RawEvent};
 use gh_monitor_timeline::snapshot::SnapshotDiff;
 use gh_monitor_timeline::{
     compress, diff, group_by_repo, CompressionConfig, NodeId, TimelineSnapshot,
@@ -183,19 +183,45 @@ fn display_source(source: &str) -> &str {
         .unwrap_or(source)
 }
 
+/// `true` when `err` is an auth-class error: the PAT is wrong/expired
+/// (`Unauthorized`) or GitHub is throttling the user (`RateLimited`).
+/// Everything else (`Server`, `Http`, `Parse`, `Events`) is treated as
+/// transient — the poller will keep trying.
+fn is_auth_error(err: &ClientError) -> bool {
+    matches!(
+        err,
+        ClientError::Unauthorized(_) | ClientError::RateLimited { .. }
+    )
+}
+
+/// Build the user-facing banner string for a `ClientError`. The
+/// `RateLimited` variant gets the friendly "rate-limited until
+/// HH:MM:SS" treatment via the shared `rate_limit_banner` helper in
+/// `gh-monitor-gh`; everything else falls through to the `Display`
+/// impl.
+fn client_error_banner(err: &ClientError) -> String {
+    match err {
+        ClientError::RateLimited { .. } => rate_limit_banner(err),
+        other => other.to_string(),
+    }
+}
+
 /// Messages that drive the application.
 #[derive(Debug, Clone)]
 pub enum Message {
     /// A poll cycle completed. `events` carries every source's batch in
     /// poll order (a source with no new events is still present with an
     /// empty vec, so the per-source "OK" status is updated for it too).
-    /// `errors` lists per-source transient and auth errors from the same
-    /// cycle. The update handler applies the flattened events in one
-    /// shot — emitting one message per source would re-build the
-    /// snapshot per source and the last one would clobber the rest.
+    /// `errors` lists per-source errors from the same cycle, typed as
+    /// [`ClientError`] so the update handler can distinguish auth
+    /// (`Unauthorized`, `RateLimited`) from transient (`Server`,
+    /// `Http`, `Parse`, `Events`) without string matching. The update
+    /// handler applies the flattened events in one shot — emitting one
+    /// message per source would re-build the snapshot per source and
+    /// the last one would clobber the rest.
     PolledCycle {
         events: Vec<(&'static str, Vec<RawEvent>)>,
-        errors: Vec<(&'static str, String)>,
+        errors: Vec<(&'static str, ClientError)>,
     },
     /// Cursor entered the overlay.
     HoverEntered,
@@ -288,15 +314,13 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                 all_events.extend(evs);
             }
             for (source, e) in errors {
-                if e.contains("401")
-                    || e.contains("403")
-                    || e.to_ascii_lowercase().contains("unauthorized")
-                {
+                let msg = client_error_banner(&e);
+                if is_auth_error(&e) {
                     error!(source = source, error = %e, "auth error");
-                    state.poll_status.record_auth_error(source, e);
+                    state.poll_status.record_auth_error(source, msg);
                 } else {
                     warn!(source = source, error = %e, "poll error");
-                    state.poll_status.record_error(source, e);
+                    state.poll_status.record_error(source, msg);
                 }
             }
             apply_events(state, all_events);
@@ -548,7 +572,7 @@ fn poll_subscription() -> Subscription<Message> {
                     warn!(error = %err, "poller construction failed; surfacing to UI");
                     let msg = Message::PolledCycle {
                         events: Vec::new(),
-                        errors: vec![("poller", err)],
+                        errors: vec![("poller", ClientError::Events(err))],
                     };
                     let _ = output.send(msg).await;
                     return;
@@ -566,7 +590,13 @@ fn poll_subscription() -> Subscription<Message> {
                         warn!(error = %e, "failed to build poller");
                         let msg = Message::PolledCycle {
                             events: Vec::new(),
-                            errors: vec![("poller", e.to_string())],
+                            // `Poller::new` returns `PollError::Auth(_)` for
+                            // "no sources configured", which the
+                            // poller's own run loop also maps to
+                            // `ClientError::Unauthorized`. Use the same
+                            // mapping here so the GUI sees a single
+                            // error type.
+                            errors: vec![("poller", ClientError::Unauthorized(e.to_string()))],
                         };
                         let _ = output.send(msg).await;
                         return;
@@ -663,6 +693,15 @@ mod tests {
     use super::*;
     use chrono::{Duration, Utc};
     use gh_monitor_gh::{EventKind, RawEvent};
+
+    /// Serialises the three `install_poller_*` tests so the shared
+    /// `POLL_CONSTRUCTION_ERROR` and `POLL_BUILD` statics don't race
+    /// with a parallel test's `install_poller_if_configured` write.
+    /// Cargo runs tests in parallel within a binary by default; the
+    /// lock-drain pattern alone isn't enough because the
+    /// `install_poller_if_configured` call and the subsequent
+    /// assertion are not atomic w.r.t. another test's call.
+    static POLL_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn ev(id: &str, repo: &str, kind: EventKind, secs_ago: i64) -> RawEvent {
         let now = Utc::now();
@@ -901,8 +940,14 @@ mod tests {
             Message::PolledCycle {
                 events: vec![("received", vec![]), ("org/rust-lang", vec![])],
                 errors: vec![
-                    ("org/rust-lang", "500 Server Error".to_string()),
-                    ("repo/octocat/Hello-World", "401 Unauthorized".to_string()),
+                    (
+                        "org/rust-lang",
+                        ClientError::Server("500 Server Error".to_string()),
+                    ),
+                    (
+                        "repo/octocat/Hello-World",
+                        ClientError::Unauthorized("401 Unauthorized".to_string()),
+                    ),
                 ],
             },
         );
@@ -926,7 +971,7 @@ mod tests {
                 events: vec![],
                 errors: vec![(
                     "poller",
-                    "repo 'a/b/c' must be in 'owner/name' form".to_string(),
+                    ClientError::Events("repo 'a/b/c' must be in 'owner/name' form".to_string()),
                 )],
             },
         );
@@ -934,6 +979,53 @@ mod tests {
         assert!(
             formatted.as_deref().unwrap_or("").contains("owner/name"),
             "expected owner/name in banner, got {formatted:?}"
+        );
+    }
+
+    #[test]
+    fn polled_cycle_distinguishes_auth_from_transient_via_typed_errors() {
+        // v1.0.1 fix: per-source errors arrive as `ClientError`, not as
+        // opaque strings. The update handler must classify them by
+        // variant (auth vs transient) without inspecting the display
+        // string. This test feeds one auth error and one transient
+        // error in the same cycle and asserts the per-source `PollStatus`
+        // records each in the right kind — no `.contains("401")` or
+        // similar string matching anywhere on the hot path.
+        let mut s = test_state();
+        let _ = update(
+            &mut s,
+            Message::PolledCycle {
+                events: vec![("received", vec![])],
+                errors: vec![
+                    (
+                        "org/rust-lang",
+                        ClientError::Unauthorized("401 Unauthorized".to_string()),
+                    ),
+                    (
+                        "repo/octocat/Hello-World",
+                        ClientError::Server("500".to_string()),
+                    ),
+                ],
+            },
+        );
+        // Pull out each source's recorded kind.
+        let rust_lang: &SourceStatus = s
+            .poll_status
+            .iter()
+            .find(|st| st.source == "org/rust-lang")
+            .expect("rust-lang source should be recorded");
+        let hello: &SourceStatus = s
+            .poll_status
+            .iter()
+            .find(|st| st.source == "repo/octocat/Hello-World")
+            .expect("hello-world source should be recorded");
+        assert!(
+            matches!(rust_lang.kind, SourceStatusKind::AuthError(_)),
+            "Unauthorized must map to AuthError, got {rust_lang:?}"
+        );
+        assert!(
+            matches!(hello.kind, SourceStatusKind::Error(_)),
+            "Server must map to transient Error, got {hello:?}"
         );
     }
 
@@ -979,7 +1071,12 @@ mod tests {
 
     #[test]
     fn install_poller_records_validation_error_for_bad_repo() {
-        // Drain any prior error from a parallel test.
+        // The three `install_poller_*` tests share the static
+        // `POLL_CONSTRUCTION_ERROR` and `POLL_BUILD` and run in
+        // parallel. The plain drain-at-start pattern races with the
+        // other test's `install_poller_if_configured` write, so we
+        // hold this lock for the entire test body to serialize them.
+        let _guard = POLL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _ = POLL_CONSTRUCTION_ERROR
             .lock()
             .ok()
@@ -998,6 +1095,7 @@ mod tests {
 
     #[test]
     fn install_poller_records_validation_error_for_leading_slash_repo() {
+        let _guard = POLL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _ = POLL_CONSTRUCTION_ERROR
             .lock()
             .ok()
@@ -1013,8 +1111,11 @@ mod tests {
 
     #[test]
     fn install_poller_succeeds_for_valid_config() {
-        // Drain any prior state from a parallel test so we get a clean
-        // install.
+        // Hold the same lock as the other two `install_poller_*`
+        // tests so the shared `POLL_CONSTRUCTION_ERROR` /
+        // `POLL_BUILD` statics don't race with a parallel test's
+        // `install_poller_if_configured` write.
+        let _guard = POLL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _ = POLL_CONSTRUCTION_ERROR
             .lock()
             .ok()
