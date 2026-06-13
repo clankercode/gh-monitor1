@@ -60,7 +60,7 @@ pub(crate) fn build_config(
         orgs,
         repos,
         poll_interval_secs,
-        window_position: None,
+        ..Config::default()
     };
     cfg.validate()?;
     Ok(cfg)

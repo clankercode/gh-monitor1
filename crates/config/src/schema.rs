@@ -2,12 +2,26 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Where to look for the GitHub personal access token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthSource {
+    /// Use the PAT stored in the `pat` field.
+    #[default]
+    Pat,
+    /// Use the GitHub CLI's stored credentials (reserved for future use).
+    Gh,
+}
+
 /// The full user config. Persisted to the platform's user config dir as
 /// TOML.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
     /// Personal access token.
     pub pat: String,
+    /// Where to source the token from.
+    #[serde(default)]
+    pub auth_source: AuthSource,
     /// GitHub username (used to fetch `received_events`).
     pub username: Option<String>,
     /// Orgs to watch.
@@ -19,9 +33,27 @@ pub struct Config {
     /// Poll interval in seconds. Defaults to 600 (10 minutes).
     #[serde(default = "default_poll_interval")]
     pub poll_interval_secs: u64,
+    /// Whether desktop notifications are enabled.
+    #[serde(default)]
+    pub notifications_enabled: bool,
     /// Last known window position.
     #[serde(default)]
     pub window_position: Option<WindowPosition>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            pat: String::new(),
+            auth_source: AuthSource::default(),
+            username: None,
+            orgs: Vec::new(),
+            repos: Vec::new(),
+            poll_interval_secs: default_poll_interval(),
+            notifications_enabled: false,
+            window_position: None,
+        }
+    }
 }
 
 fn default_poll_interval() -> u64 {
@@ -76,11 +108,7 @@ mod tests {
     fn no_sources_fails() {
         let c = Config {
             pat: "ghp_abc".to_string(),
-            username: None,
-            orgs: vec![],
-            repos: vec![],
-            poll_interval_secs: 30,
-            window_position: None,
+            ..Config::default()
         };
         assert!(c.validate().is_err());
     }
@@ -90,10 +118,7 @@ mod tests {
         let c = Config {
             pat: "ghp_abc".to_string(),
             username: Some("octocat".to_string()),
-            orgs: vec![],
-            repos: vec![],
-            poll_interval_secs: 30,
-            window_position: None,
+            ..Config::default()
         };
         assert!(c.validate().is_ok());
     }
@@ -102,11 +127,8 @@ mod tests {
     fn bad_repo_format_fails() {
         let c = Config {
             pat: "ghp_abc".to_string(),
-            username: None,
-            orgs: vec![],
             repos: vec!["nope".to_string()],
-            poll_interval_secs: 30,
-            window_position: None,
+            ..Config::default()
         };
         assert!(c.validate().is_err());
     }
@@ -116,11 +138,8 @@ mod tests {
         // `"/x"` parses (it contains a `/`) but owner is empty.
         let c = Config {
             pat: "ghp_abc".to_string(),
-            username: None,
-            orgs: vec![],
             repos: vec!["/x".to_string()],
-            poll_interval_secs: 30,
-            window_position: None,
+            ..Config::default()
         };
         let err = c.validate().unwrap_err();
         assert!(err.contains("owner/name"), "unexpected error: {err}");
@@ -131,11 +150,8 @@ mod tests {
         // `"x/"` parses (it contains a `/`) but name is empty.
         let c = Config {
             pat: "ghp_abc".to_string(),
-            username: None,
-            orgs: vec![],
             repos: vec!["x/".to_string()],
-            poll_interval_secs: 30,
-            window_position: None,
+            ..Config::default()
         };
         let err = c.validate().unwrap_err();
         assert!(err.contains("owner/name"), "unexpected error: {err}");
@@ -146,11 +162,8 @@ mod tests {
         // `"a/b/c"` has more than one `/` — name contains `/`.
         let c = Config {
             pat: "ghp_abc".to_string(),
-            username: None,
-            orgs: vec![],
             repos: vec!["a/b/c".to_string()],
-            poll_interval_secs: 30,
-            window_position: None,
+            ..Config::default()
         };
         let err = c.validate().unwrap_err();
         assert!(err.contains("owner/name"), "unexpected error: {err}");
@@ -160,11 +173,8 @@ mod tests {
     fn repo_minimal_form_ok() {
         let c = Config {
             pat: "ghp_abc".to_string(),
-            username: None,
-            orgs: vec![],
             repos: vec!["a/b".to_string()],
-            poll_interval_secs: 30,
-            window_position: None,
+            ..Config::default()
         };
         assert!(c.validate().is_ok());
     }
@@ -173,23 +183,48 @@ mod tests {
     fn repo_realistic_form_ok() {
         let c = Config {
             pat: "ghp_abc".to_string(),
-            username: None,
-            orgs: vec![],
             repos: vec!["rust-lang/rust".to_string()],
-            poll_interval_secs: 30,
-            window_position: None,
+            ..Config::default()
         };
         assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn auth_source_defaults_to_pat() {
+        let c = Config::default();
+        assert_eq!(c.auth_source, AuthSource::Pat);
+    }
+
+    #[test]
+    fn auth_source_roundtrips_via_toml() {
+        let toml_str = r#"
+            pat = "ghp_abc"
+            auth_source = "gh"
+            username = "octocat"
+        "#;
+        let c: Config = toml::from_str(toml_str).expect("parse");
+        assert_eq!(c.auth_source, AuthSource::Gh);
+        let back = toml::to_string(&c).unwrap();
+        let c2: Config = toml::from_str(&back).unwrap();
+        assert_eq!(c2.auth_source, AuthSource::Gh);
+    }
+
+    #[test]
+    fn notifications_enabled_defaults_to_false() {
+        let c = Config::default();
+        assert!(!c.notifications_enabled);
     }
 
     #[test]
     fn roundtrip_toml() {
         let c = Config {
             pat: "ghp_abc".to_string(),
+            auth_source: AuthSource::Gh,
             username: Some("octocat".to_string()),
             orgs: vec!["rust-lang".to_string()],
             repos: vec!["octocat/Hello-World".to_string()],
             poll_interval_secs: 60,
+            notifications_enabled: true,
             window_position: Some(WindowPosition { x: 100, y: 200 }),
         };
         let s = toml::to_string(&c).unwrap();

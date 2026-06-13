@@ -62,6 +62,7 @@ fn handle_cli(args: &[String]) -> Result<()> {
     match args[0].as_str() {
         "init" => setup::run().context("running setup wizard"),
         "doctor" => doctor::run().context("running doctor"),
+        "settings" => settings_hint(),
         "config" => handle_config(&args[1..]),
         "--version" | "-V" => {
             println!("gh-monitor {}", env!("CARGO_PKG_VERSION"));
@@ -74,6 +75,27 @@ fn handle_cli(args: &[String]) -> Result<()> {
             std::process::exit(2);
         }
     }
+}
+
+/// `gh-monitor settings` is the discoverable entry point for editing
+/// the running app's configuration. The in-pane settings panel is
+/// driven from the tray menu (or a right-click on the canvas) — the
+/// CLI command exists so users can find the feature from a shell, and
+/// as a forward-compatible hook for a future IPC path that would
+/// signal a running instance to open the panel. For now it points the
+/// user at the GUI.
+fn settings_hint() -> Result<()> {
+    println!(
+        "gh-monitor settings are editable from the in-app panel.\n\
+         \n\
+         When the overlay is running, open the panel via:\n\
+         - the system tray menu (look for \"Settings…\"), or\n\
+         - a right-click on the canvas (\"Settings…\" in the menu).\n\
+         \n\
+         Config file location:\n  {}",
+        config_path().display()
+    );
+    Ok(())
 }
 
 fn handle_config(args: &[String]) -> Result<()> {
@@ -147,6 +169,7 @@ fn print_help() -> Result<()> {
          COMMANDS:\n  \
              init                  Interactive first-time setup wizard\n  \
              doctor                Run diagnostic checks and exit\n  \
+             settings              Show how to open the in-app settings panel\n  \
              config path           Print the config file path\n  \
              config print          Print the loaded config as TOML\n  \
              config edit           Open the config file in $EDITOR\n  \

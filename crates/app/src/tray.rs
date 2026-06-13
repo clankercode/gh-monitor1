@@ -24,6 +24,8 @@ pub enum TrayAction {
     /// Toggle the overlay window's visibility (hide via Mode::Hidden
     /// and show via Mode::Windowed).
     ToggleVisible,
+    /// Open the in-pane settings panel.
+    OpenSettings,
     /// Quit the app.
     Quit,
 }
@@ -65,10 +67,12 @@ pub fn spawn() -> Result<TrayHandle> {
     // Build the menu. IDs are arbitrary strings; we look them up when
     // the event fires.
     let show_item = MenuItem::with_id("show", "Show / Hide", true, None);
+    let settings_item = MenuItem::with_id("settings", "Settings…", true, None);
     let quit_item = MenuItem::with_id("quit", "Quit", true, None);
 
     let menu = Menu::new();
     menu.append(&show_item).context("append show")?;
+    menu.append(&settings_item).context("append settings")?;
     menu.append(&quit_item).context("append quit")?;
 
     let icon = make_icon().context("building tray icon")?;
@@ -78,6 +82,7 @@ pub fn spawn() -> Result<TrayHandle> {
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
         let action = match event.id().0.as_str() {
             "show" => TrayAction::ToggleVisible,
+            "settings" => TrayAction::OpenSettings,
             "quit" => TrayAction::Quit,
             _ => return,
         };
