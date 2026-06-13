@@ -27,6 +27,9 @@ Built with Rust + Iced. One binary per platform. No Electron, no Tauri.
 - **Single binary per platform** — no runtime, no installer needed
 - **First-time setup wizard** — `gh-monitor init` walks you through PAT
   (input hidden on Unix), username, orgs, repos, and poll interval
+- **Diagnostic command** — `gh-monitor doctor` checks the config, PAT,
+  GitHub API, GTK, tray, display, and filesystem; prints
+  `[ OK | WARN | FAIL ]` lines with optional ANSI color
 
 ## Screenshots
 
@@ -66,6 +69,7 @@ Use the CLI to manage it:
 
 ```bash
 gh-monitor init               # interactive first-time setup wizard
+gh-monitor doctor             # run diagnostic checks and exit
 gh-monitor config path        # print the config file path
 gh-monitor config print       # print the loaded config as TOML
 gh-monitor config edit        # open the config file in $EDITOR
@@ -76,6 +80,14 @@ The `init` subcommand walks you through setting the PAT (input is hidden on
 Unix terminals), GitHub username, watched orgs, watched repos, and poll
 interval, then writes the config to the platform's user config dir. It is
 the recommended way to set up `gh-monitor` for the first time.
+
+The `doctor` subcommand is the first thing to run when something is wrong.
+It checks the config file, PAT, GitHub username/orgs/repos (live API
+calls with a 5-second timeout), GTK runtime, system-tray data path,
+display server env vars, and read+write access to the config dir. Each
+check prints one `[ OK   ] label: detail` line (green/yellow/red on a
+TTY, plain otherwise). Exit code is 0 if all OK, 1 if any FAIL, 2 if any
+WARN and no FAIL — scriptable from CI.
 
 ### Config schema
 
@@ -167,7 +179,8 @@ passthrough, click+drag, deep links, animations, tray icon, polling).
 What's still in progress:
 
 - Window-position persistence on move (currently restored on boot only)
-- GUI settings panel (use the CLI for now: `gh-monitor config edit`)
+- GUI settings panel (use the CLI for now: `gh-monitor config edit`,
+  or `gh-monitor doctor` to verify your environment)
 - Headless Iced smoke test (deferred — needs an offscreen render target)
 
 See [`PLAN.md`](PLAN.md) for the full plan and open questions.
