@@ -6,6 +6,84 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.2] — 2026-06-13
+
+### Fixed
+- **Stricter repo validation.** `Config::validate` previously accepted
+  any string containing a `/` as a `repos` entry, so `"/x"`, `"x/"`,
+  and `"a/b/c"` all passed. The poller then silently dropped the
+  malformed entry in `poll_once` and the source-label index
+  desynchronised — the next valid repo picked up the previous repo's
+  label. `Config::validate` now requires `owner/name` form (split on
+  the first `/`, both halves non-empty, name has no further `/`); the
+  poller's `intern_sources` also filters malformed repos at the
+  source so a hand-edited config can't desync the labels. Validation
+  errors are now surfaced on the overlay's status banner via the
+  `Message::PolledCycle` path, not just logged.
+- **Single-instance enforcement.** Two `gh-monitor` processes would
+  both poll GitHub (doubling the rate-limit pressure) and fight for
+  the tray icon. `main` now takes an exclusive `flock`-style lock
+  on `<config_dir>/gh-monitor.lock` before starting the GUI; a
+  second instance exits with a clear "another instance of gh-monitor
+  is already running; lock: <path>" message. CLI subcommands
+  (`init`, `doctor`, `config`, `--version`) are unaffected and can
+  run alongside the GUI. The lock is released automatically when the
+  process exits (the underlying file handle is closed by `Drop` /
+  the OS).
+- **Rate-limit (429) reset handling.** `ClientError::RateLimited`
+  is now a struct variant carrying the `X-RateLimit-Reset` Unix
+  timestamp (or a `Retry-After`-derived fallback) so the poller can
+  format a user-friendly "rate-limited until 2024-01-15 14:30:00 UTC"
+  message for the status banner. Previously a 429 produced a flat
+  "rate-limited by GitHub" string with no reset hint. The poller
+  still backs off 5 s on any error; a follow-up could sleep until
+  the reset time.
+- **Silently-swallowed poller-construction errors.**
+  `install_poller_if_configured` now records config-validation
+  failures (and `Poller::new` failures from the poller subscription)
+  in a `static` and emits a `Message::PolledCycle` with a
+  `("poller", err)` source so the existing status banner picks them
+  up. Previously both paths just `warn!`-logged and returned, and
+  the user saw "nothing happens".
+
+### Changed
+- `ClientError::RateLimited` is now `RateLimited { reset_at: Option<u64> }`.
+  A new `rate_limit_banner` helper in `gh-monitor-gh::polling`
+  produces the user-facing string. The poller run loop special-cases
+  the variant to call this helper; all other errors still go through
+  the `Display` impl.
+- The poller subscription now checks `POLL_CONSTRUCTION_ERROR`
+  before draining `POLL_BUILD`. On a non-empty static, it emits one
+  `PolledCycle` with the recorded error and exits; on a missing
+  static, it proceeds as before.
+- `Cargo.toml`: workspace `rust-version` bumped from 1.81 to 1.89 to
+  use stable `std::fs::File::try_lock` for the single-instance
+  lockfile.
+
+### Tests
+- 13 new unit tests:
+  - `repo_leading_slash_fails`, `repo_trailing_slash_fails`,
+    `repo_too_many_slashes_fails`, `repo_minimal_form_ok`,
+    `repo_realistic_form_ok` (config schema).
+  - `intern_sources_skips_malformed_repos`,
+    `intern_sources_keeps_all_malformed_when_none_valid`,
+    `rate_limit_banner_with_reset_at_is_user_friendly`,
+    `rate_limit_banner_without_reset_at_is_generic`,
+    `rate_limit_429_with_reset_header_surfaces_user_message`
+    (gh crate).
+  - `rate_limit_with_x_ratelimit_reset_header`,
+    `rate_limit_with_retry_after_falls_back`,
+    `parse_rate_limit_reset_prefers_x_header`,
+    `parse_rate_limit_reset_handles_garbage` (gh crate).
+  - `second_acquire_fails_while_first_holds`,
+    `second_acquire_succeeds_after_first_dropped`, `path_is_recorded`
+    (single-instance module).
+  - `install_poller_records_validation_error_for_bad_repo`,
+    `install_poller_records_validation_error_for_leading_slash_repo`,
+    `install_poller_succeeds_for_valid_config`,
+    `polled_cycle_surfaces_construction_error` (app).
+  Workspace total is now 144 tests.
+
 ## [0.3.1] — 2026-06-13
 
 ### Fixed
@@ -156,7 +234,8 @@ project adheres to [Semantic Versioning](https://semver.org/).
   tests for the timeline grouping, and proptests for the humanize
   function.
 
-[Unreleased]: https://github.com/clankercode/gh-monitor1/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/clankercode/gh-monitor1/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/clankercode/gh-monitor1/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/clankercode/gh-monitor1/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/clankercode/gh-monitor1/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/clankercode/gh-monitor1/compare/v0.1.1...v0.2.0

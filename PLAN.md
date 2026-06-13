@@ -448,36 +448,48 @@ hover-enter, `disable_mouse_passthrough`; on hover-leave, `enable_mouse_passthro
   (`save_config_to_writes_final_file_atomically`) verifies that no
   stale `.tmp` is left behind after a successful save.
 
-## v0.3.1 follow-ups (open)
+## v0.3.2 (added on top of v0.3.1)
 
-- **#4 Malformed repo in config desyncs the source list.** A user
-  config with `repos = ["nope"]` (missing `owner/`) is accepted by
-  `Config::validate` and stored, but `Poller::poll_once` silently
-  drops the malformed entry. The poller's `intern_sources` and
-  `poll_once` indices stay aligned for that case, but if the user
-  later edits the file to fix the format and restarts, the in-memory
-  state has a stale entry. Decide whether `Config::validate` should
-  reject malformed `owner/name` outright (cleaner) or whether the
-  poller should warn-and-skip with a banner.
-- **#5 Single-instance enforcement.** Nothing prevents two `gh-monitor`
-  instances from running at once. They'll both poll GitHub (2× the
-  rate-limit pressure) and both try to grab the tray icon. Options:
-  a PID file in the config dir with a startup check, or an OS-level
-  named lock (Linux `flock` on a XDG runtime file, macOS
-  `NSLock`-style via `flock`, Windows named mutex). PID file is
-  simpler; OS lock is more robust to crashes.
-- **#6 429 (rate-limit) reset handling.** The GitHub client parses
-  the `X-RateLimit-Reset` header and surfaces the time-to-reset on
-  errors, but `Poller::run` sleeps a flat 5 s after any error
-  regardless of type. On a 429, we should sleep until the reset
-  timestamp instead. Need to thread the `Option<Instant>` reset
-  time from `ClientError` up through `PollError` to the run loop.
-- **#7 Silently swallowed errors.** `install_poller_if_configured`
-  returns `false` on `Auth::new` failure (bad PAT format) and on a
-  poisoned `POLL_BUILD` lock — both with no log. The user sees
-  "nothing happens" and `gh-monitor doctor` reports the config as
-  valid. The 401/403 path is loud but pre-flight validation failures
-  are invisible.
+- **Stricter repo validation.** `Config::validate` used
+  `r.contains('/')` as a smoke test, so it accepted `"/x"`, `"x/"`,
+  and `"a/b/c"` — all malformed. The poller's `intern_sources` and
+  `poll_once` then desynchronised: a malformed entry was dropped in
+  `poll_once` without `idx` advancing, so the next valid repo picked
+  up the previous repo's source label. `Config::validate` now
+  requires `owner/name` form (split on the first `/`, both halves
+  non-empty, name has no further `/`); the poller's `intern_sources`
+  also filters malformed repos at the source so a hand-edited config
+  can't desync the labels. Validation errors are surfaced on the
+  overlay's status banner via the new `POLL_CONSTRUCTION_ERROR`
+  static and the existing `Message::PolledCycle` error-banner path.
+- **Single-instance lockfile.** Two `gh-monitor` processes would
+  both poll GitHub (2× the rate-limit pressure) and fight for the
+  tray icon. `main` now takes an exclusive `flock`-style lock on
+  `<config_dir>/gh-monitor.lock` before starting the GUI; a second
+  instance exits with a clear "another instance of gh-monitor is
+  already running; lock: <path>" message. CLI subcommands
+  (`init`, `doctor`, `config`, `--version`) are unaffected and can
+  run alongside the GUI. The lock is released automatically when the
+  process exits (the underlying file handle is closed by `Drop` /
+  the OS). The MSRV is bumped from 1.81 to 1.89 to use stable
+  `std::fs::File::try_lock`.
+- **Rate-limit (429) reset handling.** `ClientError::RateLimited` is
+  now a struct variant carrying the `X-RateLimit-Reset` Unix
+  timestamp (or a `Retry-After`-derived fallback). A new
+  `rate_limit_banner` helper in `gh-monitor-gh::polling` produces
+  the user-facing "rate-limited until 2024-01-15 14:30:00 UTC"
+  string for the status banner. Previously a 429 produced a flat
+  "rate-limited by GitHub" string with no reset hint. The poller
+  still backs off 5 s on any error; a follow-up could sleep until
+  the reset time.
+- **Poller-construction errors surfaced.** `install_poller_if_configured`
+  and the poller subscription now record errors
+  (config-validation failures, `Poller::new` failures) in a
+  `static POLL_CONSTRUCTION_ERROR` and emit a
+  `Message::PolledCycle { errors: [("poller", err)] }` so the
+  existing status banner picks them up. Previously both paths
+  `warn!`-logged and returned; the user saw "nothing happens" and
+  `gh-monitor doctor` reported the config as valid.
 
 ## v0.4.0 (added on top of v0.3.0)
 

@@ -51,7 +51,10 @@ impl Config {
             return Err("poll_interval_secs must be >= 5".to_string());
         }
         for r in &self.repos {
-            if !r.contains('/') {
+            let Some((owner, name)) = r.split_once('/') else {
+                return Err(format!("repo '{}' must be in 'owner/name' form", r));
+            };
+            if owner.is_empty() || name.is_empty() || name.contains('/') {
                 return Err(format!("repo '{}' must be in 'owner/name' form", r));
             }
         }
@@ -106,6 +109,77 @@ mod tests {
             window_position: None,
         };
         assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn repo_leading_slash_fails() {
+        // `"/x"` parses (it contains a `/`) but owner is empty.
+        let c = Config {
+            pat: "ghp_abc".to_string(),
+            username: None,
+            orgs: vec![],
+            repos: vec!["/x".to_string()],
+            poll_interval_secs: 30,
+            window_position: None,
+        };
+        let err = c.validate().unwrap_err();
+        assert!(err.contains("owner/name"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn repo_trailing_slash_fails() {
+        // `"x/"` parses (it contains a `/`) but name is empty.
+        let c = Config {
+            pat: "ghp_abc".to_string(),
+            username: None,
+            orgs: vec![],
+            repos: vec!["x/".to_string()],
+            poll_interval_secs: 30,
+            window_position: None,
+        };
+        let err = c.validate().unwrap_err();
+        assert!(err.contains("owner/name"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn repo_too_many_slashes_fails() {
+        // `"a/b/c"` has more than one `/` — name contains `/`.
+        let c = Config {
+            pat: "ghp_abc".to_string(),
+            username: None,
+            orgs: vec![],
+            repos: vec!["a/b/c".to_string()],
+            poll_interval_secs: 30,
+            window_position: None,
+        };
+        let err = c.validate().unwrap_err();
+        assert!(err.contains("owner/name"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn repo_minimal_form_ok() {
+        let c = Config {
+            pat: "ghp_abc".to_string(),
+            username: None,
+            orgs: vec![],
+            repos: vec!["a/b".to_string()],
+            poll_interval_secs: 30,
+            window_position: None,
+        };
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn repo_realistic_form_ok() {
+        let c = Config {
+            pat: "ghp_abc".to_string(),
+            username: None,
+            orgs: vec![],
+            repos: vec!["rust-lang/rust".to_string()],
+            poll_interval_secs: 30,
+            window_position: None,
+        };
+        assert!(c.validate().is_ok());
     }
 
     #[test]

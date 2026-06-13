@@ -350,7 +350,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             let now = Instant::now();
             let should_save = state
                 .last_position_save_at
-                .map_or(true, |t| now.duration_since(t) >= POSITION_SAVE_DEBOUNCE);
+                .is_none_or(|t| now.duration_since(t) >= POSITION_SAVE_DEBOUNCE);
             if should_save {
                 state.last_position_save_at = Some(now);
                 state.config_save_pending = false;
@@ -408,7 +408,7 @@ const POSITION_SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 /// timestamp of the last successful save. Pure: extracted so the
 /// debounce policy is testable without an Iced runtime.
 fn should_save_position(now: Instant, last: Option<Instant>) -> bool {
-    last.map_or(true, |t| now.duration_since(t) >= POSITION_SAVE_DEBOUNCE)
+    last.is_none_or(|t| now.duration_since(t) >= POSITION_SAVE_DEBOUNCE)
 }
 
 /// Synchronously flush the pending window position to disk. Called on
@@ -529,11 +529,30 @@ fn dedupe_events(events: Vec<RawEvent>) -> Vec<RawEvent> {
 /// The poll subscription. On first run, this constructs the poller and
 /// spawns it on Iced's tokio runtime (so we don't need a separate
 /// runtime). The poller then streams items into Iced via the channel.
+///
+/// On startup, if `install_poller_if_configured` recorded a
+/// construction error (config validation failure or
+/// `Poller::new` failure), we surface it as a single `PolledCycle` so
+/// the existing status banner picks it up. The error is also logged at
+/// WARN for the `gh-monitor doctor` / log file path.
 fn poll_subscription() -> Subscription<Message> {
     Subscription::run(|| {
         iced::stream::channel(
             8,
             async move |mut output: iced::futures::channel::mpsc::Sender<Message>| {
+                if let Some(err) = POLL_CONSTRUCTION_ERROR
+                    .lock()
+                    .ok()
+                    .and_then(|mut g| g.take())
+                {
+                    warn!(error = %err, "poller construction failed; surfacing to UI");
+                    let msg = Message::PolledCycle {
+                        events: Vec::new(),
+                        errors: vec![("poller", err)],
+                    };
+                    let _ = output.send(msg).await;
+                    return;
+                }
                 let taken = POLL_BUILD.lock().ok().and_then(|mut g| g.take());
                 let Some((auth, cfg)) = taken else {
                     // No poller was configured (e.g. PAT missing), or the
@@ -545,6 +564,11 @@ fn poll_subscription() -> Subscription<Message> {
                     Ok(p) => p,
                     Err(e) => {
                         warn!(error = %e, "failed to build poller");
+                        let msg = Message::PolledCycle {
+                            events: Vec::new(),
+                            errors: vec![("poller", e.to_string())],
+                        };
+                        let _ = output.send(msg).await;
                         return;
                     }
                 };
@@ -590,9 +614,22 @@ fn tray_subscription() -> Subscription<Message> {
 
 static POLL_BUILD: Mutex<Option<(Auth, PollConfig)>> = Mutex::new(None);
 
+/// Construction-time error recorded by `install_poller_if_configured`
+/// (config validation failure, malformed repo format, etc.). The
+/// poller subscription drains this once on startup and surfaces the
+/// message to the GUI as a single `PolledCycle` so the existing
+/// status banner picks it up.
+static POLL_CONSTRUCTION_ERROR: Mutex<Option<String>> = Mutex::new(None);
+
 /// Stash the auth + poll config so `poll_subscription` can build the
 /// poller on Iced's runtime. Returns `true` if a poller was queued for
-/// start (PAT was set). Idempotent: a second call is a no-op.
+/// start (PAT was set and validation passed). Idempotent: a second
+/// call is a no-op.
+///
+/// On config validation failure, the message is recorded in
+/// `POLL_CONSTRUCTION_ERROR` and the function returns `false`. The
+/// poller subscription will pick the message up and surface it on the
+/// overlay's status banner.
 pub fn install_poller_if_configured(initial: &Config) -> bool {
     if initial.pat.trim().is_empty() {
         return false;
@@ -600,6 +637,12 @@ pub fn install_poller_if_configured(initial: &Config) -> bool {
     let Ok(auth) = Auth::new(initial.pat.clone()) else {
         return false;
     };
+    if let Err(e) = initial.validate() {
+        if let Ok(mut g) = POLL_CONSTRUCTION_ERROR.lock() {
+            *g = Some(e);
+        }
+        return false;
+    }
     let poll_cfg = PollConfig {
         username: initial.username.clone(),
         orgs: initial.orgs.clone(),
@@ -871,6 +914,30 @@ mod tests {
     }
 
     #[test]
+    fn polled_cycle_surfaces_construction_error() {
+        // The poller subscription emits a PolledCycle with a "poller"
+        // source label when construction fails (e.g. config validate()
+        // or Poller::new returns Err). Verify that the existing error
+        // banner picks this up via the same path as a per-source error.
+        let mut s = test_state();
+        let _ = update(
+            &mut s,
+            Message::PolledCycle {
+                events: vec![],
+                errors: vec![(
+                    "poller",
+                    "repo 'a/b/c' must be in 'owner/name' form".to_string(),
+                )],
+            },
+        );
+        let formatted = format_poll_status(&s.poll_status);
+        assert!(
+            formatted.as_deref().unwrap_or("").contains("owner/name"),
+            "expected owner/name in banner, got {formatted:?}"
+        );
+    }
+
+    #[test]
     fn window_moved_first_event_records_pending_false() {
         // First WindowMoved: last_position_save_at is None, so should_save is
         // true; config_save_pending should be cleared (we did save).
@@ -897,5 +964,70 @@ mod tests {
             s.config.window_position,
             Some(WindowPosition { x: 50, y: 60 })
         );
+    }
+
+    fn valid_config() -> Config {
+        Config {
+            pat: "ghp_test".to_string(),
+            username: Some("octocat".to_string()),
+            orgs: vec!["rust-lang".to_string()],
+            repos: vec![],
+            poll_interval_secs: 30,
+            window_position: None,
+        }
+    }
+
+    #[test]
+    fn install_poller_records_validation_error_for_bad_repo() {
+        // Drain any prior error from a parallel test.
+        let _ = POLL_CONSTRUCTION_ERROR
+            .lock()
+            .ok()
+            .and_then(|mut g| g.take());
+        let cfg = Config {
+            repos: vec!["a/b/c".to_string()],
+            ..valid_config()
+        };
+        assert!(!install_poller_if_configured(&cfg));
+        let stored = POLL_CONSTRUCTION_ERROR.lock().ok().and_then(|g| g.clone());
+        assert!(
+            stored.as_deref().unwrap_or("").contains("owner/name"),
+            "expected owner/name error, got {stored:?}"
+        );
+    }
+
+    #[test]
+    fn install_poller_records_validation_error_for_leading_slash_repo() {
+        let _ = POLL_CONSTRUCTION_ERROR
+            .lock()
+            .ok()
+            .and_then(|mut g| g.take());
+        let cfg = Config {
+            repos: vec!["/x".to_string()],
+            ..valid_config()
+        };
+        assert!(!install_poller_if_configured(&cfg));
+        let stored = POLL_CONSTRUCTION_ERROR.lock().ok().and_then(|g| g.clone());
+        assert!(stored.is_some(), "expected error to be stored");
+    }
+
+    #[test]
+    fn install_poller_succeeds_for_valid_config() {
+        // Drain any prior state from a parallel test so we get a clean
+        // install.
+        let _ = POLL_CONSTRUCTION_ERROR
+            .lock()
+            .ok()
+            .and_then(|mut g| g.take());
+        let _ = POLL_BUILD.lock().ok().map(|mut g| g.take());
+        let cfg = valid_config();
+        assert!(install_poller_if_configured(&cfg));
+        let stored = POLL_CONSTRUCTION_ERROR.lock().ok().and_then(|g| g.clone());
+        assert!(
+            stored.is_none(),
+            "no error should be recorded for valid config, got {stored:?}"
+        );
+        // Drain POLL_BUILD so we don't leak state to the next test.
+        let _ = POLL_BUILD.lock().ok().map(|mut g| g.take());
     }
 }

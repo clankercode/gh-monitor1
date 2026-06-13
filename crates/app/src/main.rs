@@ -6,6 +6,7 @@ use tracing::info;
 use gh_monitor_app::config_io::{config_path, ensure_template, load_config};
 use gh_monitor_app::doctor;
 use gh_monitor_app::setup;
+use gh_monitor_app::single_instance::{lock_path, SingleInstance};
 use gh_monitor_app::tray;
 use gh_monitor_app::{run, AppSettings};
 
@@ -17,6 +18,19 @@ fn main() -> Result<()> {
     if !args.is_empty() {
         return handle_cli(&args);
     }
+
+    // Acquire a single-instance lock. A second `gh-monitor` process
+    // would double the GitHub rate-limit pressure and fight for the
+    // tray icon; we refuse to start in that case. The CLI subcommands
+    // above (init / doctor / config / --version) are allowed to run
+    // alongside the GUI, so the lock is only taken on the GUI path.
+    let _instance = match SingleInstance::new(&lock_path()) {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
 
     let config = load_config().context("loading config")?;
     info!(
