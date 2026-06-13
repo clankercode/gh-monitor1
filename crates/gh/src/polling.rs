@@ -209,6 +209,9 @@ impl Poller {
                     had_error = true;
                     let msg = match err {
                         PollError::Client(ClientError::Unauthorized(msg)) => msg.clone(),
+                        PollError::Client(c @ ClientError::RateLimited { .. }) => {
+                            rate_limit_banner(c)
+                        }
                         _ => err.to_string(),
                     };
                     errors_out.push((source.source, msg));
@@ -297,9 +300,34 @@ impl Poller {
     }
 }
 
+/// Format a `RateLimited` error for the user-facing status banner.
+/// When the server supplied an `X-RateLimit-Reset` (or
+/// `Retry-After`), the banner shows `rate-limited until <HH:MM:SS UTC>`
+/// so the user knows when polling will resume. Without a reset time,
+/// the banner falls back to the generic "rate-limited by GitHub".
+pub(crate) fn rate_limit_banner(err: &ClientError) -> String {
+    match err {
+        ClientError::RateLimited { reset_at: Some(ts) } => {
+            chrono::DateTime::from_timestamp(*ts as i64, 0)
+                .map(|dt| format!("rate-limited until {}", dt.format("%Y-%m-%d %H:%M:%S UTC")))
+                .unwrap_or_else(|| format!("rate-limited until epoch {ts}"))
+        }
+        ClientError::RateLimited { reset_at: None } => "rate-limited by GitHub".to_string(),
+        // Defensive: only `RateLimited` is ever passed in, but keep a
+        // sane fallback so this helper can be reused safely.
+        other => other.to_string(),
+    }
+}
+
 /// Leak the source labels so they live for `'static`. The number of
 /// sources is bounded by the user's config (a handful), so the memory
 /// cost is negligible.
+///
+/// Repos that aren't in `owner/name` form (e.g. `"nope"`, `"/x"`,
+/// `"a/b/c"`) are dropped here. `Config::validate` already rejects
+/// these but the poller is reachable in tests and from older configs;
+/// skipping at the source keeps the `sources` vec's indices aligned
+/// with `poll_once`'s `idx` counter.
 fn intern_sources(cfg: &PollConfig) -> Vec<&'static str> {
     let mut out = Vec::new();
     if cfg.username.is_some() {
@@ -310,6 +338,13 @@ fn intern_sources(cfg: &PollConfig) -> Vec<&'static str> {
         out.push(label);
     }
     for repo in &cfg.repos {
+        if repo
+            .split_once('/')
+            .filter(|(o, n)| !o.is_empty() && !n.is_empty() && !n.contains('/'))
+            .is_none()
+        {
+            continue;
+        }
         let label: &'static str = Box::leak(format!("repo/{repo}").into_boxed_str());
         out.push(label);
     }
@@ -325,6 +360,114 @@ mod tests {
 
     fn test_auth() -> Auth {
         Auth::new("ghp_test").unwrap()
+    }
+
+    #[test]
+    fn intern_sources_skips_malformed_repos() {
+        // The poller's `intern_sources` and `poll_once` share a single
+        // index space; if a malformed repo leaks into `intern_sources`
+        // but is skipped in `poll_once` (or vice versa) the wrong
+        // source label is bound to the wrong request. `Config::validate`
+        // already rejects these, but the poller must also defend itself
+        // so a stale or hand-edited config can't desync the labels.
+        let cfg = PollConfig {
+            username: Some("octocat".to_string()),
+            orgs: vec!["rust-lang".to_string()],
+            repos: vec![
+                "nope".to_string(),
+                "/leading".to_string(),
+                "trailing/".to_string(),
+                "a/b/c".to_string(),
+                "good/one".to_string(),
+            ],
+            interval: Duration::from_secs(30),
+        };
+        let labels = intern_sources(&cfg);
+        assert_eq!(
+            labels,
+            vec!["received", "org/rust-lang", "repo/good/one"],
+            "malformed repos must be dropped"
+        );
+    }
+
+    #[test]
+    fn intern_sources_keeps_all_malformed_when_none_valid() {
+        let cfg = PollConfig {
+            username: None,
+            orgs: vec![],
+            repos: vec!["nope".to_string(), "/x".to_string(), "a/b/c".to_string()],
+            interval: Duration::from_secs(30),
+        };
+        let labels = intern_sources(&cfg);
+        assert!(labels.is_empty(), "expected no labels, got {labels:?}");
+    }
+
+    #[test]
+    fn rate_limit_banner_with_reset_at_is_user_friendly() {
+        // 1700000000 = 2023-11-14 22:13:20 UTC
+        let err = ClientError::RateLimited {
+            reset_at: Some(1700000000),
+        };
+        let msg = rate_limit_banner(&err);
+        assert!(
+            msg.starts_with("rate-limited until "),
+            "unexpected banner: {msg}"
+        );
+        assert!(msg.contains("2023-11-14"), "missing date in {msg}");
+        assert!(msg.contains("22:13:20"), "missing HH:MM:SS in {msg}");
+        assert!(msg.contains("UTC"), "missing UTC in {msg}");
+    }
+
+    #[test]
+    fn rate_limit_banner_without_reset_at_is_generic() {
+        let err = ClientError::RateLimited { reset_at: None };
+        let msg = rate_limit_banner(&err);
+        assert_eq!(msg, "rate-limited by GitHub");
+    }
+
+    #[tokio::test]
+    async fn rate_limit_429_with_reset_header_surfaces_user_message() {
+        // End-to-end: a 429 with `X-RateLimit-Reset: 1234567890`
+        // (which is 2009-02-13 23:31:30 UTC) must surface as
+        // "rate-limited until 2009-02-13 23:31:30 UTC" in the per-source
+        // error string, so the GUI banner shows the user when polling
+        // will resume.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(429).insert_header("X-RateLimit-Reset", "1234567890"),
+            )
+            .mount(&server)
+            .await;
+        let cfg = PollConfig {
+            username: Some("octocat".to_string()),
+            orgs: vec![],
+            repos: vec![],
+            interval: Duration::from_secs(60),
+        };
+        let poller = Poller::with_client_config(
+            test_auth(),
+            cfg,
+            ClientConfig {
+                base_url: server.uri(),
+                user_agent: "test".to_string(),
+                timeout: Duration::from_secs(5),
+            },
+        )
+        .unwrap();
+        let outcome = poller.poll_once().await;
+        assert_eq!(outcome.total_events(), 0);
+        assert_eq!(outcome.total_errors(), 1);
+        let raw = &outcome.sources[0].errors[0];
+        let msg = match raw {
+            PollError::Client(c @ ClientError::RateLimited { .. }) => rate_limit_banner(c),
+            other => panic!("expected RateLimited, got {other:?}"),
+        };
+        assert!(
+            msg.contains("rate-limited until"),
+            "expected user-friendly banner, got: {msg}"
+        );
+        assert!(msg.contains("2009-02-13"), "missing date in {msg}");
     }
 
     #[tokio::test]

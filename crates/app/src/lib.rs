@@ -13,6 +13,7 @@ mod link;
 mod overlay;
 mod paint;
 pub mod setup;
+pub mod single_instance;
 pub mod tray;
 
 pub use app::{run, AppSettings};
