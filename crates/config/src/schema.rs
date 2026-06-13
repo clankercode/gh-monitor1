@@ -16,7 +16,7 @@ pub struct Config {
     /// Repos to watch ("owner/name").
     #[serde(default)]
     pub repos: Vec<String>,
-    /// Poll interval in seconds. Defaults to 30.
+    /// Poll interval in seconds. Defaults to 600 (10 minutes).
     #[serde(default = "default_poll_interval")]
     pub poll_interval_secs: u64,
     /// Last known window position.
@@ -25,7 +25,7 @@ pub struct Config {
 }
 
 fn default_poll_interval() -> u64 {
-    30
+    600
 }
 
 /// A window position (top-left, in physical pixels).

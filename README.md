@@ -104,8 +104,8 @@ orgs = ["rust-lang", "tokio-rs"]
 # Individual repos to watch (in addition to the above orgs)
 repos = ["octocat/Hello-World"]
 
-# Poll interval in seconds. Default 30.
-poll_interval_secs = 30
+# Poll interval in seconds. Default 600 (10 minutes).
+poll_interval_secs = 600
 ```
 
 You can also point the app at a config by setting environment variables

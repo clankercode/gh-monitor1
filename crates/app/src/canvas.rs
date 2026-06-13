@@ -135,12 +135,23 @@ impl Program<Message, iced::Theme, iced::Renderer> for TimelineProgram {
                 for rect in &rects {
                     if rect.contains(p) {
                         let node = &self.snapshot.nodes[rect.index];
-                        return Some(
-                            Action::publish(Message::OpenUrl(node.target_url.clone()))
-                                .and_capture(),
-                        );
+                        // Open the URL on press, but DON'T capture the
+                        // event — we want subsequent widgets (and the
+                        // outer MouseArea) to also see the press so that
+                        // window-drag and click-to-open both work
+                        // reliably. The OS will short-circuit a drag
+                        // on a quick click, and the URL still opens.
+                        return Some(Action::publish(Message::OpenUrl(
+                            node.target_url.clone(),
+                        )));
                     }
                 }
+                // Empty area: trigger window drag. Without this,
+                // click-and-drag only worked the first time because
+                // the outer MouseArea's `on_press` was getting
+                // shadowed by the canvas's `and_capture` action
+                // once the user's first drag ended on a node.
+                return Some(Action::publish(Message::DragWindow));
             }
         }
         None

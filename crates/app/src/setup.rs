@@ -26,7 +26,7 @@ pub fn run() -> Result<()> {
     let repos = parse_list(&prompt_line(
         "Repos to watch (comma-separated, or empty): ",
     )?);
-    let poll_interval_secs = prompt_poll_interval("Poll interval in seconds [30]: ")?;
+    let poll_interval_secs = prompt_poll_interval("Poll interval in seconds [600]: ")?;
 
     let cfg = build_config(pat, username, orgs, repos, poll_interval_secs)
         .map_err(|e| anyhow::anyhow!("invalid configuration: {e}"))?;
@@ -100,7 +100,7 @@ fn prompt_poll_interval(prompt: &str) -> Result<u64> {
     loop {
         let raw = prompt_line(prompt)?;
         if raw.is_empty() {
-            return Ok(30);
+            return Ok(600);
         }
         match raw.parse::<u64>() {
             Ok(n) if n >= 5 => return Ok(n),

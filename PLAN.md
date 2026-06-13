@@ -44,7 +44,7 @@ real work, ambient and glanceable.
 - Transparent always-on-top overlay window (decorationless, frameless)
 - Mouse-passthrough that toggles on hover-enter / hover-leave
 - Click+drag the pane to reposition (position persists)
-- Polls GitHub Events API every 30s for `received_events` and per-org
+- Polls GitHub Events API every 10 min (configurable) for `received_events` and per-org
   `orgs/{org}/events`
 - Timeline rendering with grouping by repo, compression of similar events,
   humanized time ranges

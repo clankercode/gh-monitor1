@@ -32,7 +32,7 @@ pat = ""
 # repos = ["octocat/Hello-World"]
 
 # Poll interval in seconds
-poll_interval_secs = 30
+poll_interval_secs = 600
 "#;
 
 /// Write the config template to `path` if no file is there yet. Returns
@@ -117,7 +117,7 @@ pub fn default_config() -> Config {
         username,
         orgs,
         repos,
-        poll_interval_secs: 30,
+        poll_interval_secs: 600,
         window_position: None,
     }
 }
@@ -160,7 +160,7 @@ mod tests {
             username: Some("octocat".to_string()),
             orgs: vec!["rust-lang".to_string()],
             repos: vec!["octocat/Hello-World".to_string()],
-            poll_interval_secs: 30,
+            poll_interval_secs: 600,
             window_position: Some(WindowPosition { x: 100, y: 200 }),
         }
     }

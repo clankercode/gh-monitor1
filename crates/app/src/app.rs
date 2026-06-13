@@ -450,10 +450,14 @@ fn view(state: &State) -> Element<'_, Message, Theme, iced::Renderer> {
     let canvas = Canvas::new(&state.program)
         .width(iced::Length::Fill)
         .height(iced::Length::Fill);
+    // The canvas itself decides what to do with a press: publish
+    // `Message::OpenUrl` for a hit-tested node, or `Message::DragWindow`
+    // for empty area. Wrapping in a MouseArea for `on_press` is no
+    // longer needed and was the source of the "drag only works the
+    // first time" bug (the inner `and_capture` shadowed it).
     let area = iced::widget::MouseArea::new(canvas)
         .on_enter(Message::HoverEntered)
-        .on_exit(Message::HoverLeft)
-        .on_press(Message::DragWindow);
+        .on_exit(Message::HoverLeft);
     area.into()
 }
 
