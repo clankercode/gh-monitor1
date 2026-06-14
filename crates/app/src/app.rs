@@ -21,7 +21,7 @@ use iced::keyboard::{self, key, Key};
 use iced::widget::canvas::Canvas;
 use iced::window::{self, Id, Level, Mode, Settings as WindowSettings};
 use iced::{Element, Event, Size, Subscription, Task, Theme};
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 use crate::animation::NodeAnim;
 use crate::canvas::TimelineProgram;
@@ -1147,15 +1147,17 @@ fn dedupe_events(events: Vec<RawEvent>) -> Vec<RawEvent> {
     out
 }
 
-/// The poll subscription. On first run, this constructs the poller and
-/// spawns it on Iced's tokio runtime (so we don't need a separate
-/// runtime). The poller then streams items into Iced via the channel.
+/// The poll subscription. Subscribes to the `POLL_CONFIG` watch
+/// channel and rebuilds the poller whenever the user changes the
+/// config via the settings panel. Runs the poller on Iced's tokio
+/// runtime (so we don't need a separate runtime) and streams
+/// results into Iced via the channel.
 ///
-/// On startup, if `install_poller_if_configured` recorded a
+/// Startup: if `install_poller_if_configured` recorded a
 /// construction error (config validation failure or
-/// `Poller::new` failure), we surface it as a single `PolledCycle` so
-/// the existing status banner picks it up. The error is also logged at
-/// WARN for the `gh-monitor doctor` / log file path.
+/// `Poller::new` failure), we surface it as a single `PolledCycle`
+/// so the existing status banner picks it up. The error is also
+/// logged at WARN for the `gh-monitor doctor` / log file path.
 fn poll_subscription() -> Subscription<Message> {
     Subscription::run(|| {
         iced::stream::channel(
@@ -1174,42 +1176,119 @@ fn poll_subscription() -> Subscription<Message> {
                     let _ = output.send(msg).await;
                     return;
                 }
-                let taken = POLL_BUILD.lock().ok().and_then(|mut g| g.take());
-                let Some((auth, cfg)) = taken else {
-                    // No poller was configured (e.g. PAT missing), or the
-                    // subscription has already been started in a previous
-                    // tick. Either way, nothing more to do.
-                    return;
+                // Subscribe to the live config channel. The
+                // initial value is whatever `install_poller_*`
+                // last published (or `None` if it never ran).
+                let mut rx = POLL_CONFIG.0.subscribe();
+                // Mark the current value as seen so the
+                // `has_changed()` check below only fires on
+                // *future* config writes, not the initial state.
+                let initial: Option<(Auth, PollConfig)> = rx.borrow_and_update().clone();
+                let mut poller: Option<Poller> = match initial.as_ref() {
+                    Some((auth, cfg)) => match Poller::new(auth.clone(), cfg.clone()) {
+                        Ok(p) => Some(p),
+                        Err(e) => {
+                            warn!(error = %e, "failed to build initial poller");
+                            let msg = Message::PolledCycle {
+                                events: Vec::new(),
+                                errors: vec![("poller", ClientError::Unauthorized(e.to_string()))],
+                            };
+                            let _ = output.send(msg).await;
+                            None
+                        }
+                    },
+                    None => None,
                 };
-                let interval = cfg.interval;
-                let poller = match Poller::new(auth, cfg) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        warn!(error = %e, "failed to build poller");
-                        let msg = Message::PolledCycle {
-                            events: Vec::new(),
-                            errors: vec![("poller", ClientError::Unauthorized(e.to_string()))],
-                        };
-                        let _ = output.send(msg).await;
-                        return;
-                    }
-                };
-                let mut ticker = tokio::time::interval(interval);
+                // Build the initial ticker from the initial
+                // interval (or a sensible default if no poller
+                // is configured yet). The ticker is recreated
+                // whenever the interval changes.
+                let initial_interval = initial
+                    .as_ref()
+                    .map(|(_, c)| c.interval)
+                    .unwrap_or(DEFAULT_POLL_INTERVAL);
+                let mut ticker = tokio::time::interval(initial_interval);
                 ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 loop {
-                    // `Notify::notified()` returns a fused future: it
-                    // resolves on the next call to `notify_one` and
-                    // then never again, so we re-create it every
-                    // iteration to wait for the next signal.
+                    // Check for a config change BEFORE waiting
+                    // for the next tick. `has_changed()` is
+                    // non-blocking and returns true exactly
+                    // once per `send()` (after the receiver's
+                    // last `borrow_and_update()`). The
+                    // `RecvError` variant only fires when the
+                    // sender is dropped, which would mean the
+                    // process is shutting down — fall through
+                    // to the normal tick path in that case.
+                    if rx.has_changed().unwrap_or(false) {
+                        let new = rx.borrow_and_update().clone();
+                        match new {
+                            Some((auth, cfg)) => {
+                                info!(
+                                    interval = ?cfg.interval,
+                                    "poller config changed; rebuilding"
+                                );
+                                match Poller::new(auth, cfg.clone()) {
+                                    Ok(p) => {
+                                        poller = Some(p);
+                                        // Recreate the ticker so
+                                        // the new interval takes
+                                        // effect. The first tick
+                                        // of a fresh `interval`
+                                        // is immediate; that's
+                                        // the desired behaviour
+                                        // (the user just changed
+                                        // settings, give them a
+                                        // fresh poll).
+                                        ticker = tokio::time::interval(cfg.interval);
+                                        ticker.set_missed_tick_behavior(
+                                            tokio::time::MissedTickBehavior::Skip,
+                                        );
+                                    }
+                                    Err(e) => {
+                                        warn!(error = %e, "failed to rebuild poller");
+                                        poller = None;
+                                        let msg = Message::PolledCycle {
+                                            events: Vec::new(),
+                                            errors: vec![(
+                                                "poller",
+                                                ClientError::Unauthorized(e.to_string()),
+                                            )],
+                                        };
+                                        let _ = output.send(msg).await;
+                                    }
+                                }
+                            }
+                            None => {
+                                info!("poller config cleared; dropping running poller");
+                                poller = None;
+                            }
+                        }
+                        continue;
+                    }
+                    // No config change — wait for the next
+                    // tick, a forced poll, or a config change
+                    // (whichever comes first).
                     let notified = FORCE_POLL.notified();
                     tokio::pin!(notified);
                     let tick = ticker.tick();
                     tokio::pin!(tick);
+                    let changed = rx.changed();
+                    tokio::pin!(changed);
                     let _reason: &'static str;
                     tokio::select! {
                         _ = &mut tick => { _reason = "interval"; }
                         _ = notified => { _reason = "forced"; }
+                        _ = &mut changed => {
+                            // Config changed; loop back to the
+                            // top and rebuild before polling.
+                            continue;
+                        }
                     }
+                    let Some(poller) = poller.as_ref() else {
+                        // No poller (PAT cleared). Drop the
+                        // tick and wait for the next event.
+                        continue;
+                    };
                     let outcome = poller.poll_once().await;
                     let mut events_out: Vec<(&'static str, Vec<RawEvent>)> =
                         Vec::with_capacity(outcome.sources.len());
@@ -1237,6 +1316,12 @@ fn poll_subscription() -> Subscription<Message> {
         )
     })
 }
+
+/// Fallback poll interval used by the poller subscription when no
+/// config is installed yet (e.g. fresh launch with no PAT). The
+/// user-facing default lives in `gh-monitor-config`; this constant
+/// is just a sane placeholder for the ticker's initial schedule.
+const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(600);
 
 /// The tray subscription. Drains `crate::tray::tray_rx_owned()` and
 /// turns each `TrayAction` into a `Message::TrayAction`. No-op if the
@@ -1277,6 +1362,40 @@ static FORCE_POLL: std::sync::LazyLock<tokio::sync::Notify> =
 /// status banner picks it up.
 static POLL_CONSTRUCTION_ERROR: Mutex<Option<String>> = Mutex::new(None);
 
+/// The payload broadcast on the poller config watch channel. The
+/// `Option` lets a settings save that clears the PAT also tear
+/// down the running poller (`None` ⇒ "drop, wait for a new
+/// value").
+type PollConfigPayload = Option<(Auth, PollConfig)>;
+
+/// Live `(Auth, PollConfig)` broadcast for the poller subscription.
+/// `install_poller_if_configured` writes to this whenever the user
+/// saves a new config (startup, settings save, PAT change); the
+/// poller subscription holds a `watch::Receiver` and rebuilds
+/// itself with the new config whenever the value changes. This
+/// replaces the previous `POLL_BUILD: Mutex<Option<…>>` pattern,
+/// which was consumed once on first use and never updated, so
+/// post-startup config changes (the v1.1 settings flow) never
+/// reached the running poller.
+///
+/// The channel is initialised with `None`, which matches the
+/// previous startup behaviour (no poller until a config is
+/// installed).
+///
+/// The second element of the tuple is a "keeper" `watch::Receiver`
+/// that we never read from — it exists solely to keep the channel
+/// open. Without it, `Sender::send` would return `Err` (and drop
+/// the value) whenever no live subscription is holding a receiver
+/// (e.g. in tests, or during the gap between an Iced restart and
+/// the subscription factory running again).
+static POLL_CONFIG: std::sync::LazyLock<(
+    tokio::sync::watch::Sender<PollConfigPayload>,
+    tokio::sync::watch::Receiver<PollConfigPayload>,
+)> = std::sync::LazyLock::new(|| {
+    let (tx, rx) = tokio::sync::watch::channel(None);
+    (tx, rx)
+});
+
 /// Stash the auth + poll config so `poll_subscription` can build the
 /// poller on Iced's runtime. Returns `true` if a poller was queued for
 /// start (PAT was set and validation passed). Idempotent: a second
@@ -1288,9 +1407,16 @@ static POLL_CONSTRUCTION_ERROR: Mutex<Option<String>> = Mutex::new(None);
 /// overlay's status banner.
 pub fn install_poller_if_configured(initial: &Config) -> bool {
     if initial.pat.trim().is_empty() {
+        // No PAT: signal the poller subscription to drop any
+        // running poller. The previous `POLL_BUILD: Mutex<Option>`
+        // pattern returned early in this branch; the new watch
+        // channel actively publishes `None` so a settings save
+        // that clears the PAT also tears down the live poller.
+        let _ = POLL_CONFIG.0.send(None);
         return false;
     }
     let Ok(auth) = Auth::new(initial.pat.clone()) else {
+        let _ = POLL_CONFIG.0.send(None);
         return false;
     };
     if let Err(e) = initial.validate() {
@@ -1305,13 +1431,34 @@ pub fn install_poller_if_configured(initial: &Config) -> bool {
         repos: initial.repos.clone(),
         interval: Duration::from_secs(initial.poll_interval_secs),
     };
-    if let Ok(mut g) = POLL_BUILD.lock() {
-        if g.is_none() {
-            *g = Some((auth, poll_cfg));
-            return true;
-        }
+    // `watch::Sender::send` is non-blocking and returns `Err`
+    // only when there are no receivers. The poller subscription
+    // always holds a receiver, so an error here is a logic bug
+    // — log and move on.
+    if let Err(e) = POLL_CONFIG.0.send(Some((auth, poll_cfg))) {
+        warn!(error = %e, "failed to broadcast poller config; no receiver");
     }
-    false
+    true
+}
+
+/// Read the current value of the live poller-config watch channel.
+/// Returns the latest `(Auth, PollConfig)` published by
+/// `install_poller_if_configured`, or `None` if no PAT is set or the
+/// channel has been cleared. Exposed for tests so they can assert
+/// the side-effect of a settings save.
+#[cfg(test)]
+fn current_poll_config() -> Option<(Auth, PollConfig)> {
+    POLL_CONFIG.0.subscribe().borrow().clone()
+}
+
+/// Reset the live poller-config watch channel to `None`. Used by
+/// tests for setup/teardown so a `send(None)` from a previous test
+/// doesn't bleed into the next one. Production code never calls
+/// this; in production the channel is updated only by
+/// `install_poller_if_configured`.
+#[cfg(test)]
+fn reset_poll_config() {
+    let _ = POLL_CONFIG.0.send(None);
 }
 
 #[cfg(test)]
@@ -1752,15 +1899,17 @@ mod tests {
     #[test]
     fn install_poller_records_validation_error_for_bad_repo() {
         // The three `install_poller_*` tests share the static
-        // `POLL_CONSTRUCTION_ERROR` and `POLL_BUILD` and run in
-        // parallel. The plain drain-at-start pattern races with the
-        // other test's `install_poller_if_configured` write, so we
-        // hold this lock for the entire test body to serialize them.
+        // `POLL_CONSTRUCTION_ERROR` and the `POLL_CONFIG` watch
+        // channel and run in parallel. The plain drain-at-start
+        // pattern races with the other test's
+        // `install_poller_if_configured` write, so we hold this
+        // lock for the entire test body to serialize them.
         let _guard = POLL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _ = POLL_CONSTRUCTION_ERROR
             .lock()
             .ok()
             .and_then(|mut g| g.take());
+        reset_poll_config();
         let cfg = Config {
             repos: vec!["a/b/c".to_string()],
             ..valid_config()
@@ -1780,6 +1929,7 @@ mod tests {
             .lock()
             .ok()
             .and_then(|mut g| g.take());
+        reset_poll_config();
         let cfg = Config {
             repos: vec!["/x".to_string()],
             ..valid_config()
@@ -1793,14 +1943,14 @@ mod tests {
     fn install_poller_succeeds_for_valid_config() {
         // Hold the same lock as the other two `install_poller_*`
         // tests so the shared `POLL_CONSTRUCTION_ERROR` /
-        // `POLL_BUILD` statics don't race with a parallel test's
-        // `install_poller_if_configured` write.
+        // `POLL_CONFIG` statics don't race with a parallel
+        // test's `install_poller_if_configured` write.
         let _guard = POLL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _ = POLL_CONSTRUCTION_ERROR
             .lock()
             .ok()
             .and_then(|mut g| g.take());
-        let _ = POLL_BUILD.lock().ok().map(|mut g| g.take());
+        reset_poll_config();
         let cfg = valid_config();
         assert!(install_poller_if_configured(&cfg));
         let stored = POLL_CONSTRUCTION_ERROR.lock().ok().and_then(|g| g.clone());
@@ -1808,8 +1958,160 @@ mod tests {
             stored.is_none(),
             "no error should be recorded for valid config, got {stored:?}"
         );
-        // Drain POLL_BUILD so we don't leak state to the next test.
-        let _ = POLL_BUILD.lock().ok().map(|mut g| g.take());
+        // The new value must be visible on the live config
+        // channel — this is the v1.1 fix: the running poller can
+        // pick up post-startup config changes.
+        let live = current_poll_config().expect("config must be published");
+        assert_eq!(live.0.pat, cfg.pat, "live PAT must match the saved PAT");
+        assert_eq!(live.1.interval, Duration::from_secs(cfg.poll_interval_secs));
+        assert_eq!(live.1.orgs, cfg.orgs);
+        // Reset so we don't leak state to the next test.
+        reset_poll_config();
+    }
+
+    #[test]
+    fn submit_settings_updates_poller_config() {
+        // User-visible path: the user opens settings, changes the
+        // PAT/orgs/poll-interval, hits Save, and the change must
+        // reach the live poller. `submit_settings` calls
+        // `install_poller_if_configured` which publishes on the
+        // `POLL_CONFIG` watch channel; before the v1.1 fix that
+        // function wrote to a `Mutex<Option<…>>` that was drained
+        // once and never re-read, so post-startup config changes
+        // were silently dropped.
+        let _guard = POLL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = POLL_CONSTRUCTION_ERROR
+            .lock()
+            .ok()
+            .and_then(|mut g| g.take());
+        reset_poll_config();
+        // Pre-condition: starting config (with the default
+        // 30-second interval from `valid_config`) is published.
+        let initial = valid_config();
+        assert!(install_poller_if_configured(&initial));
+        let before = current_poll_config().expect("initial config must publish");
+        assert_eq!(before.1.interval, Duration::from_secs(30));
+        assert_eq!(before.1.orgs, initial.orgs);
+
+        // Now simulate a settings save: a new config with a
+        // different poll interval, a new org, and a new repo.
+        // `submit_settings` itself goes through
+        // `crate::config_io::save_config` (which writes to disk
+        // and is not mockable in unit tests), so we exercise the
+        // exact same `install_poller_if_configured` call that
+        // `submit_settings` makes — this is the function whose
+        // contract changed in v1.1.
+        let updated = Config {
+            pat: "ghp_test".to_string(),
+            username: Some("octocat".to_string()),
+            orgs: vec!["tokio-rs".to_string()],
+            repos: vec!["rust-lang/rust".to_string()],
+            poll_interval_secs: 120,
+            ..valid_config()
+        };
+        assert!(install_poller_if_configured(&updated));
+        let after = current_poll_config().expect("updated config must publish");
+        assert_eq!(
+            after.1.interval,
+            Duration::from_secs(120),
+            "new poll interval must be visible on the live channel"
+        );
+        assert_eq!(
+            after.1.orgs,
+            vec!["tokio-rs".to_string()],
+            "new orgs must be visible on the live channel"
+        );
+        assert_eq!(
+            after.1.repos,
+            vec!["rust-lang/rust".to_string()],
+            "new repos must be visible on the live channel"
+        );
+        // Cleanup.
+        reset_poll_config();
+    }
+
+    #[tokio::test]
+    async fn poll_subscription_picks_up_new_config() {
+        // v1.1 regression: a running poller must observe a
+        // post-startup config change and re-build itself. The
+        // full `poll_subscription` factory spawns on Iced's
+        // runtime; we test the watch-channel contract directly so
+        // the test stays fast and doesn't need a renderer.
+        //
+        // 1. Subscribe to the live channel and mark the initial
+        //    value as seen (matching what `poll_subscription`
+        //    does on startup).
+        // 2. Send a new config via `install_poller_if_configured`.
+        // 3. Assert the receiver observes the change.
+        let _guard = POLL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = POLL_CONSTRUCTION_ERROR
+            .lock()
+            .ok()
+            .and_then(|mut g| g.take());
+        reset_poll_config();
+
+        let mut rx = POLL_CONFIG.0.subscribe();
+        // Mark the initial value as seen.
+        let _ = rx.borrow_and_update();
+        // Pre-condition: no change observed yet.
+        assert!(
+            !rx.has_changed().unwrap_or(false),
+            "no change should be observed before any send"
+        );
+
+        // Send a new config — the running poller would now
+        // re-build itself with this value.
+        let cfg = valid_config();
+        assert!(install_poller_if_configured(&cfg));
+        assert!(
+            rx.has_changed().unwrap_or(false),
+            "a new config send must be observed by the receiver"
+        );
+        let observed = rx
+            .borrow_and_update()
+            .clone()
+            .expect("value must be Some after a successful install");
+        assert_eq!(observed.0.pat, cfg.pat);
+        assert_eq!(
+            observed.1.interval,
+            Duration::from_secs(cfg.poll_interval_secs)
+        );
+        assert_eq!(observed.1.orgs, cfg.orgs);
+
+        // Second send — change the interval; the running poller
+        // would reset its ticker. Verify the channel still works.
+        let cfg2 = Config {
+            poll_interval_secs: 60,
+            ..cfg.clone()
+        };
+        assert!(install_poller_if_configured(&cfg2));
+        assert!(
+            rx.has_changed().unwrap_or(false),
+            "a second config send must also be observed"
+        );
+        let observed2 = rx.borrow_and_update().clone().expect("value must be Some");
+        assert_eq!(observed2.1.interval, Duration::from_secs(60));
+
+        // Clear the PAT — this is the v1.1 path for "user
+        // emptied the PAT field in settings". The running poller
+        // would drop itself.
+        let empty_pat = Config {
+            pat: String::new(),
+            ..cfg.clone()
+        };
+        assert!(!install_poller_if_configured(&empty_pat));
+        assert!(
+            rx.has_changed().unwrap_or(false),
+            "a clear (PAT emptied) must be observed"
+        );
+        let observed3 = rx.borrow_and_update().clone();
+        assert!(
+            observed3.is_none(),
+            "clearing the PAT must publish None, got {observed3:?}"
+        );
+
+        // Cleanup.
+        reset_poll_config();
     }
 
     // === Demo mode tests =========================================
