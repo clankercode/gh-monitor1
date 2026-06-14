@@ -1,7 +1,7 @@
 //! The Iced `canvas::Program` that renders the timeline.
 
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use iced::border;
 use iced::mouse::{self, Cursor, Interaction};
@@ -28,6 +28,14 @@ const DEMO_BTN_INDICATOR_GAP: f32 = 8.0;
 /// button so they share a top row.
 const DEMO_INDICATOR_HEIGHT: f32 = 24.0;
 
+/// Width of the bell-icon hit-test rect. Sits to the LEFT of the
+/// demo button in the same top row.
+pub(crate) const BELL_HIT_WIDTH: f32 = 28.0;
+/// Height of the bell-icon hit-test rect.
+pub(crate) const BELL_HIT_HEIGHT: f32 = 24.0;
+/// Gap between the bell and the demo button.
+pub(crate) const BELL_BTN_GAP: f32 = 8.0;
+
 /// The canvas program. Holds the current snapshot, the per-node animation
 /// state, and the current window id.
 #[derive(Debug)]
@@ -45,6 +53,11 @@ pub struct TimelineProgram {
     /// indicator is only drawn when this is `Some`. Set from the
     /// app's `sync_program` after every state change.
     pub demo_remaining_secs: Option<u64>,
+    /// Whether desktop notifications are enabled. The bell icon
+    /// in the top-right of the canvas reflects this: 🔔 when
+    /// enabled, 🔕 when muted. Set from the app's
+    /// `sync_program` after every state change.
+    pub notifications_enabled: bool,
 }
 
 impl Default for TimelineProgram {
@@ -62,6 +75,7 @@ impl TimelineProgram {
             status: None,
             needs_setup: false,
             demo_remaining_secs: None,
+            notifications_enabled: false,
         }
     }
 
@@ -85,6 +99,26 @@ impl TimelineProgram {
     }
 }
 
+/// The rectangle of the bell icon. Sits in the chrome strip to
+/// the LEFT of the demo button so a click on the bell never falls
+/// through to the demo button or a node.
+pub(crate) fn bell_rect(bounds: Rectangle) -> Rectangle {
+    let demo_x = bounds.width - DEMO_CHROME_MARGIN - DEMO_BTN_WIDTH;
+    Rectangle {
+        x: demo_x - BELL_BTN_GAP - BELL_HIT_WIDTH,
+        y: DEMO_CHROME_MARGIN,
+        width: BELL_HIT_WIDTH,
+        height: BELL_HIT_HEIGHT,
+    }
+}
+
+/// Hit-test the bell icon. Returns `true` when `pos` lies within
+/// the icon's clickable rect. `pos` is the cursor position
+/// *relative to* `bounds` (i.e. `cursor.position_in(bounds)`).
+pub(crate) fn bell_hit(bounds: Rectangle, pos: Point) -> bool {
+    bell_rect(bounds).contains(pos)
+}
+
 impl Program<Message, iced::Theme, iced::Renderer> for TimelineProgram {
     type State = ();
 
@@ -101,6 +135,14 @@ impl Program<Message, iced::Theme, iced::Renderer> for TimelineProgram {
 
         let (rects, _size) = layout(&self.snapshot, bounds.width);
         let cursor_pos = cursor.position_in(bounds);
+
+        // Bell icon: drawn before the nodes so the nodes sit on
+        // top visually, but the hit-test region is its own
+        // dedicated rect in the chrome strip — separate from the
+        // first node's time-label area and from the demo button,
+        // so a click on the bell is unambiguous.
+        let bell_hovered = cursor_pos.map(|p| bell_hit(bounds, p)).unwrap_or(false);
+        draw_bell(&mut frame, bounds, self.notifications_enabled, bell_hovered);
 
         for (i, node) in self.snapshot.nodes.iter().enumerate() {
             if i >= rects.len() {
@@ -167,10 +209,14 @@ impl Program<Message, iced::Theme, iced::Renderer> for TimelineProgram {
 
         if let Some(p) = cursor_pos {
             if let Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) = event {
-                // Demo button first — it sits in the chrome strip
-                // above the first node and must take priority over
-                // any node that might happen to overlap (the status
-                // banner overlays the same area).
+                // Bell first (leftmost in the chrome strip), then
+                // demo button, then nodes, then drag. Both chrome
+                // buttons must take priority over any node that
+                // might happen to overlap (the status banner and
+                // the demo button can both be over node #1).
+                if bell_hit(bounds, p) {
+                    return Some(Action::publish(Message::ToggleNotifications));
+                }
                 if demo_button_rect(bounds).contains(p) {
                     return Some(Action::publish(Message::StartDemo));
                 }
@@ -194,7 +240,21 @@ impl Program<Message, iced::Theme, iced::Renderer> for TimelineProgram {
                 return Some(Action::publish(Message::DragWindow));
             }
         }
-        None
+        // Self-driven redraw: when any node is mid-animation
+        // (fade-in or pulse), request a redraw ~30×/sec so the
+        // canvas keeps animating. When nothing is animating,
+        // return `None` and let Iced skip the next frame — the
+        // canvas only repaints on state changes or user input.
+        let now = Instant::now();
+        let any_active = self
+            .anims
+            .values()
+            .any(|a| a.opacity.is_animating(now) || a.pulse.is_animating(now));
+        if any_active {
+            Some(Action::request_redraw_at(now + Duration::from_millis(33)))
+        } else {
+            None
+        }
     }
 
     fn mouse_interaction(
@@ -205,10 +265,13 @@ impl Program<Message, iced::Theme, iced::Renderer> for TimelineProgram {
     ) -> mouse::Interaction {
         let (rects, _) = layout(&self.snapshot, bounds.width);
         if let Some(p) = cursor.position_in(bounds) {
-            // Demo button takes priority over nodes — the button
-            // lives in the chrome strip that overlaps the first
+            // Bell + demo button take priority over nodes — both
+            // live in the chrome strip that overlaps the first
             // node, so a node hit-test alone would show a pointer
             // cursor even when the cursor is on the button.
+            if bell_hit(bounds, p) {
+                return Interaction::Pointer;
+            }
             if demo_button_rect(bounds).contains(p) {
                 return Interaction::Pointer;
             }
@@ -299,6 +362,54 @@ fn demo_indicator_rect(bounds: Rectangle) -> Rectangle {
         width: (x_right_of_indicator - DEMO_CHROME_MARGIN).max(0.0),
         height: DEMO_INDICATOR_HEIGHT,
     }
+}
+
+/// Draw the bell icon in the top-right of the canvas. `enabled`
+/// picks the glyph (🔔 / 🔕) and `hovered` adds a subtle
+/// background pad so the user can see the click target. Sits
+/// to the LEFT of the demo button in the same top row.
+fn draw_bell(frame: &mut Frame, bounds: Rectangle, enabled: bool, hovered: bool) {
+    let rect = bell_rect(bounds);
+    if hovered {
+        let pad = Path::rounded_rectangle(
+            Point::new(rect.x - 2.0, rect.y - 2.0),
+            Size::new(rect.width + 4.0, rect.height + 4.0),
+            border::Radius::new(6.0),
+        );
+        frame.fill(
+            &pad,
+            Color {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 0.08,
+            },
+        );
+    }
+    let glyph = if enabled { "\u{1F514}" } else { "\u{1F515}" };
+    let color = if enabled {
+        Color {
+            r: 1.0,
+            g: 0.90,
+            b: 0.55,
+            a: 0.95,
+        }
+    } else {
+        Color {
+            r: 0.65,
+            g: 0.65,
+            b: 0.70,
+            a: 0.85,
+        }
+    };
+    frame.fill_text(canvas::Text {
+        content: glyph.to_string(),
+        position: Point::new(rect.x + 4.0, rect.y + 2.0),
+        max_width: rect.width,
+        color,
+        size: 16.0.into(),
+        ..canvas::Text::default()
+    });
 }
 
 /// Draw the "🎬 Demo" button in the top-right corner. The button
@@ -654,6 +765,174 @@ mod tests {
             ind.x,
             ind.width,
             btn.x
+        );
+    }
+
+    // ---- bell icon tests ----
+
+    fn test_bounds() -> Rectangle {
+        Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 420.0,
+            height: 540.0,
+        }
+    }
+
+    fn cursor_at(p: Point) -> Cursor {
+        Cursor::Available(p)
+    }
+
+    #[test]
+    fn bell_anchored_to_left_of_demo_button() {
+        // The bell must sit in the same top row as the demo
+        // button, to its LEFT, with the configured gap.
+        let bounds = test_bounds();
+        let btn = demo_button_rect(bounds);
+        let bell = bell_rect(bounds);
+        assert_eq!(bell.y, btn.y, "bell and demo button share the top row");
+        assert_eq!(bell.height, btn.height);
+        assert!(
+            bell.x + bell.width + BELL_BTN_GAP <= btn.x + 0.01,
+            "bell must end `BELL_BTN_GAP` before demo button starts: \
+             bell.x={} bell.width={} gap={} btn.x={}",
+            bell.x,
+            bell.width,
+            BELL_BTN_GAP,
+            btn.x
+        );
+    }
+
+    #[test]
+    fn bell_hit_inside_rect() {
+        let bounds = test_bounds();
+        let r = bell_rect(bounds);
+        let cx = r.x + r.width / 2.0;
+        let cy = r.y + r.height / 2.0;
+        assert!(bell_hit(bounds, Point::new(cx, cy)));
+    }
+
+    #[test]
+    fn bell_hit_outside_rect() {
+        let bounds = test_bounds();
+        // Far left of the canvas is not the bell.
+        assert!(!bell_hit(bounds, Point::new(5.0, 5.0)));
+        // The demo-button area is to the RIGHT of the bell —
+        // a click there is not the bell.
+        let btn = demo_button_rect(bounds);
+        let cx = btn.x + btn.width / 2.0;
+        let cy = btn.y + btn.height / 2.0;
+        assert!(
+            !bell_hit(bounds, Point::new(cx, cy)),
+            "demo button area must not hit the bell"
+        );
+    }
+
+    // ---- smart redraw tests ----
+
+    fn make_program_with_anim(anim: NodeAnim) -> TimelineProgram {
+        let mut p = TimelineProgram::new();
+        let id = NodeId::new("test");
+        p.snapshot.nodes.push(TimelineNode {
+            id: id.clone(),
+            kind: gh_monitor_timeline::NodeKind::Group,
+            repo: "x/y".to_string(),
+            pairs: vec![],
+            time_label: "1 hr ago".to_string(),
+            earliest: chrono::Utc::now(),
+            latest: chrono::Utc::now(),
+            target_url: "https://github.com/x/y".to_string(),
+        });
+        p.anims.insert(id, anim);
+        p
+    }
+
+    fn press_event() -> Event {
+        Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
+    }
+
+    #[test]
+    fn update_requests_redraw_when_animation_active() {
+        // A freshly-inserted node has an opacity animation that
+        // is in progress for ~400ms. update() with a no-op event
+        // must therefore request a redraw so the canvas keeps
+        // animating.
+        let p = make_program_with_anim(NodeAnim::new_insert(Instant::now()));
+        let bounds = test_bounds();
+        let cursor = cursor_at(Point::new(0.0, 0.0));
+        // A `Window(Resized)` event is a real Iced event but
+        // doesn't change anything for the canvas; perfect for a
+        // no-op input to exercise the redraw-request path.
+        let ev = Event::Window(iced::window::Event::Resized(Size::new(420.0, 540.0)));
+        let action = p.update(&mut (), &ev, bounds, cursor);
+        let (msg, redraw, _status) = action.expect("expected redraw action").into_inner();
+        assert!(msg.is_none(), "no message should be published");
+        assert!(
+            matches!(redraw, iced::window::RedrawRequest::At(_)),
+            "expected a redraw-at action, got {redraw:?}"
+        );
+    }
+
+    #[test]
+    fn update_returns_none_when_no_animation() {
+        // With no animations registered the canvas should NOT
+        // request a redraw — Iced only repaints on state changes
+        // or input.
+        let mut p = TimelineProgram::new();
+        p.snapshot.nodes.push(TimelineNode {
+            id: NodeId::new("x"),
+            kind: gh_monitor_timeline::NodeKind::Group,
+            repo: "x/y".to_string(),
+            pairs: vec![],
+            time_label: "1 hr ago".to_string(),
+            earliest: chrono::Utc::now(),
+            latest: chrono::Utc::now(),
+            target_url: "https://github.com/x/y".to_string(),
+        });
+        let bounds = test_bounds();
+        let cursor = cursor_at(Point::new(0.0, 0.0));
+        let ev = Event::Window(iced::window::Event::Resized(Size::new(420.0, 540.0)));
+        let action = p.update(&mut (), &ev, bounds, cursor);
+        assert!(
+            action.is_none(),
+            "expected no redraw action when nothing is animating, got {action:?}"
+        );
+    }
+
+    #[test]
+    fn update_handles_click_first() {
+        // When the event is a mouse press on the bell, the click
+        // action takes priority over the redraw action — the
+        // user must never lose a click to a redraw-while-
+        // animating code path.
+        let p = make_program_with_anim(NodeAnim::new_insert(Instant::now()));
+        let bounds = test_bounds();
+        let r = bell_rect(bounds);
+        let cursor = cursor_at(Point::new(r.x + r.width / 2.0, r.y + r.height / 2.0));
+        let action = p.update(&mut (), &press_event(), bounds, cursor);
+        let (msg, _redraw, _status) = action.expect("expected action").into_inner();
+        let msg = msg.expect("expected a published message");
+        assert!(
+            matches!(msg, Message::ToggleNotifications),
+            "expected ToggleNotifications, got {msg:?}"
+        );
+    }
+
+    #[test]
+    fn click_outside_bell_falls_through_to_drag() {
+        // A click that misses both the bell, the demo button,
+        // and any node must publish `Message::DragWindow` (the
+        // empty-area path). The animation is active here; the
+        // click action still wins.
+        let p = make_program_with_anim(NodeAnim::new_insert(Instant::now()));
+        let bounds = test_bounds();
+        let cursor = cursor_at(Point::new(5.0, 5.0));
+        let action = p.update(&mut (), &press_event(), bounds, cursor);
+        let (msg, _redraw, _status) = action.expect("expected action").into_inner();
+        let msg = msg.expect("expected a published message");
+        assert!(
+            matches!(msg, Message::DragWindow),
+            "expected DragWindow, got {msg:?}"
         );
     }
 }

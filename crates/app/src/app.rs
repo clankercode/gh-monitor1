@@ -2,13 +2,15 @@
 //! the GitHub poller, the timeline state, the canvas, and the
 //! passthrough state machine together.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use gh_monitor_config::schema::WindowPosition;
 use gh_monitor_config::Config;
-use gh_monitor_gh::{rate_limit_banner, Auth, ClientError, PollConfig, Poller, RawEvent};
+use gh_monitor_gh::{
+    rate_limit_banner, Auth, ClientError, EventKind, PollConfig, Poller, RawEvent,
+};
 use gh_monitor_timeline::snapshot::SnapshotDiff;
 use gh_monitor_timeline::{
     compress, diff, group_by_repo, CompressionConfig, NodeId, TimelineSnapshot,
@@ -27,6 +29,7 @@ use crate::context_menu::{ContextMenu, MenuItem};
 use crate::demo;
 use crate::doctor::CheckResult;
 use crate::link::open_url;
+use crate::notifications;
 use crate::overlay::OverlayState;
 use crate::settings::{SettingsField, SettingsForm};
 use crate::tray::TrayAction;
@@ -317,6 +320,12 @@ pub enum Message {
     /// Reset the settings form to the default config and stay in the
     /// panel.
     SettingsReset,
+    /// The user clicked the bell icon in the top-right of the
+    /// canvas; flip the `notifications_enabled` flag and persist
+    /// the new value to disk. The settings panel's checkbox stays
+    /// in sync because `state.config` is the single source of
+    /// truth.
+    ToggleNotifications,
 }
 
 /// Run the application. Blocks until the window is closed.
@@ -407,8 +416,11 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                     state.poll_status.record_error(source, msg);
                 }
             }
-            apply_events(state, all_events);
+            let (prev_snap, diff) = apply_events(state, all_events);
             sync_program(state);
+            if state.config.notifications_enabled {
+                fire_notifications(&prev_snap, &state.snapshot, &diff);
+            }
             Task::none()
         }
         Message::HoverEntered => {
@@ -674,6 +686,29 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                 state.settings_error = None;
             }
             Task::none()
+        }
+        Message::ToggleNotifications => {
+            // Flip the flag in state and persist it. The user
+            // clicked the bell icon in the canvas; the icon glyph
+            // is part of the canvas's draw path and reflects the
+            // new value on the next paint.
+            state.config.notifications_enabled = !state.config.notifications_enabled;
+            // If the settings panel is open, mirror the change so
+            // the checkbox stays consistent with state.config.
+            if state.show_settings {
+                state.settings_form = SettingsForm::from_config(&state.config);
+            }
+            let cfg = state.config.clone();
+            sync_program(state);
+            iced::Task::future(async move {
+                if let Err(e) = crate::config_io::save_config(&cfg) {
+                    warn!(
+                        error = %e,
+                        "failed to persist notifications toggle"
+                    );
+                }
+            })
+            .discard()
         }
     }
 }
@@ -945,7 +980,7 @@ fn title(_state: &State) -> String {
     "gh-monitor".to_string()
 }
 
-fn apply_events(state: &mut State, events: Vec<RawEvent>) {
+fn apply_events(state: &mut State, events: Vec<RawEvent>) -> (TimelineSnapshot, SnapshotDiff) {
     // A repo watched both as a user repo and via an org will surface the
     // same event id in `received_events` and `org_events`. Dedupe by id
     // before grouping so the same event doesn't inflate counts.
@@ -959,14 +994,18 @@ fn apply_events(state: &mut State, events: Vec<RawEvent>) {
 
     let d: SnapshotDiff = diff(&prev, &snap);
     let now_inst = Instant::now();
-    for id in d.added {
-        state.anims.insert(id, NodeAnim::new_insert(now_inst));
+    for id in &d.added {
+        state
+            .anims
+            .insert(id.clone(), NodeAnim::new_insert(now_inst));
     }
-    for id in d.updated {
-        if let Some(anim) = state.anims.get_mut(&id) {
+    for id in &d.updated {
+        if let Some(anim) = state.anims.get_mut(id) {
             anim.trigger_pulse(now_inst);
         } else {
-            state.anims.insert(id, NodeAnim::new_insert(now_inst));
+            state
+                .anims
+                .insert(id.clone(), NodeAnim::new_insert(now_inst));
         }
     }
     let to_remove: Vec<NodeId> = state
@@ -978,6 +1017,7 @@ fn apply_events(state: &mut State, events: Vec<RawEvent>) {
     for id in to_remove {
         state.anims.remove(&id);
     }
+    (prev, d)
 }
 
 /// Push the current state into the canvas program. Called after any
@@ -991,6 +1031,69 @@ fn sync_program(state: &mut State) {
         .demo
         .as_ref()
         .map(|d| d.remaining_secs(Instant::now()));
+    state.program.notifications_enabled = state.config.notifications_enabled;
+}
+
+/// Compute the per-(repo, kind) count delta introduced by `diff`.
+/// Added nodes contribute their full `(kind, count)` pairs (the
+/// node did not exist before). Updated nodes contribute the count
+/// delta only — if the kind set changed (e.g. an "issues opened"
+/// pair was added on top of "PRs opened"), the new pair's full
+/// count is added because the previous node had no entry for it.
+///
+/// Pure helper extracted for testability: tests can drive
+/// `aggregate_new_counts` directly with crafted snapshots and
+/// diffs to verify the aggregation rules without going through
+/// the Iced runtime.
+fn aggregate_new_counts(
+    prev: &TimelineSnapshot,
+    next: &TimelineSnapshot,
+    diff: &SnapshotDiff,
+) -> BTreeMap<(String, EventKind), u32> {
+    let prev_by_id: HashMap<&NodeId, &gh_monitor_timeline::TimelineNode> =
+        prev.nodes.iter().map(|n| (&n.id, n)).collect();
+    let next_by_id: HashMap<&NodeId, &gh_monitor_timeline::TimelineNode> =
+        next.nodes.iter().map(|n| (&n.id, n)).collect();
+    let mut out: BTreeMap<(String, EventKind), u32> = BTreeMap::new();
+    for id in &diff.added {
+        if let Some(node) = next_by_id.get(id) {
+            for (kc,) in &node.pairs {
+                *out.entry((node.repo.clone(), kc.kind)).or_insert(0) += kc.count;
+            }
+        }
+    }
+    for id in &diff.updated {
+        let Some(node) = next_by_id.get(id) else {
+            continue;
+        };
+        let prev_node = prev_by_id.get(id);
+        let prev_pairs: HashMap<EventKind, u32> = prev_node
+            .map(|n| n.pairs.iter().map(|(kc,)| (kc.kind, kc.count)).collect())
+            .unwrap_or_default();
+        for (kc,) in &node.pairs {
+            let prev_count = prev_pairs.get(&kc.kind).copied().unwrap_or(0);
+            let delta = kc.count.saturating_sub(prev_count);
+            if delta > 0 {
+                *out.entry((node.repo.clone(), kc.kind)).or_insert(0) += delta;
+            }
+        }
+    }
+    out
+}
+
+/// Fire one notification per non-zero (repo, kind) pair, in
+/// sorted order so two cycles with the same activity produce the
+/// same notification order. Best-effort: a single failure is
+/// logged and the rest still fire.
+fn fire_notifications(prev: &TimelineSnapshot, next: &TimelineSnapshot, diff: &SnapshotDiff) {
+    let counts = aggregate_new_counts(prev, next, diff);
+    for ((repo, kind), count) in counts {
+        if count == 0 {
+            continue;
+        }
+        let body = format!("{repo}: {}", crate::paint::pair_label(kind, count));
+        notifications::fire("gh-monitor", &body);
+    }
 }
 
 /// Deduplicate events by their GitHub `id`. The first occurrence wins.
@@ -1748,5 +1851,184 @@ mod tests {
         let before_nodes = s.snapshot.nodes.len();
         let _ = update(&mut s, Message::FrameTick(Instant::now()));
         assert_eq!(s.snapshot.nodes.len(), before_nodes);
+    }
+
+    // Notifications tests. All three flip the global
+    // `notifications::CAPTURE_MODE` so they serialise on
+    // `notifications::TEST_LOCK` to avoid clobbering each other's
+    // captured notifications.
+    #[test]
+    fn notifications_disabled_does_not_fire() {
+        let _guard = crate::notifications::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::notifications::set_capture_mode(true);
+        let _ = crate::notifications::take_captured();
+
+        // notifications_enabled defaults to false; feeding a
+        // PolledCycle must NOT push anything to the capture
+        // buffer.
+        let mut s = test_state();
+        assert!(!s.config.notifications_enabled);
+        let e1 = ev("e1", "rust-lang/rust", EventKind::PrOpened, 100);
+        let _ = update(
+            &mut s,
+            Message::PolledCycle {
+                events: vec![("received", vec![e1])],
+                errors: vec![],
+            },
+        );
+        let captured = crate::notifications::take_captured();
+        crate::notifications::set_capture_mode(false);
+        assert!(
+            captured.is_empty(),
+            "no notification should fire when disabled, got {captured:?}"
+        );
+    }
+
+    #[test]
+    fn notification_aggregates_per_repo_and_kind() {
+        // 3 PrOpened events in rust-lang/rust (same repo, same
+        // kind) must produce ONE notification, not three. The
+        // body uses the existing pair_label formatter so it reads
+        // "rust-lang/rust: 3 PRs opened".
+        let _guard = crate::notifications::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::notifications::set_capture_mode(true);
+        let _ = crate::notifications::take_captured();
+
+        let mut s = test_state();
+        s.config.notifications_enabled = true;
+        let e1 = ev("e1", "rust-lang/rust", EventKind::PrOpened, 300);
+        let e2 = ev("e2", "rust-lang/rust", EventKind::PrOpened, 200);
+        let e3 = ev("e3", "rust-lang/rust", EventKind::PrOpened, 100);
+        let _ = update(
+            &mut s,
+            Message::PolledCycle {
+                events: vec![("received", vec![e1, e2, e3])],
+                errors: vec![],
+            },
+        );
+        let captured = crate::notifications::take_captured();
+        crate::notifications::set_capture_mode(false);
+        assert_eq!(
+            captured.len(),
+            1,
+            "3 PRs in same repo must produce one notification, got {captured:?}"
+        );
+        assert_eq!(captured[0].title, "gh-monitor");
+        assert_eq!(
+            captured[0].body, "rust-lang/rust: 3 PRs opened",
+            "body should use pair_label formatting, got {:?}",
+            captured[0].body
+        );
+    }
+
+    #[test]
+    fn notification_aggregates_across_nodes() {
+        // Two separate nodes in the same repo with the same kind
+        // (e.g. two time windows) must still produce ONE
+        // notification with the combined count. The compression
+        // algorithm splits nodes on time gaps, so we verify the
+        // cross-node aggregation here.
+        let _guard = crate::notifications::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::notifications::set_capture_mode(true);
+        let _ = crate::notifications::take_captured();
+
+        let mut s = test_state();
+        s.config.notifications_enabled = true;
+        // 5 PRs from 24h ago (a separate time window) + 2 PRs
+        // from 1h ago. Both compress into two nodes for the
+        // same repo, and the aggregation must sum them.
+        let mut events = Vec::new();
+        for i in 0..5 {
+            events.push(ev(
+                &format!("old-{i}"),
+                "rust-lang/rust",
+                EventKind::PrOpened,
+                86_400,
+            ));
+        }
+        for i in 0..2 {
+            events.push(ev(
+                &format!("new-{i}"),
+                "rust-lang/rust",
+                EventKind::PrOpened,
+                60,
+            ));
+        }
+        let _ = update(
+            &mut s,
+            Message::PolledCycle {
+                events: vec![("received", events)],
+                errors: vec![],
+            },
+        );
+        let captured = crate::notifications::take_captured();
+        crate::notifications::set_capture_mode(false);
+        assert_eq!(
+            captured.len(),
+            1,
+            "two nodes in same repo/kind must aggregate to one notification, got {captured:?}"
+        );
+        assert_eq!(captured[0].body, "rust-lang/rust: 7 PRs opened");
+    }
+
+    #[test]
+    fn notifications_per_repo_are_distinct() {
+        // PRs in rust-lang and PRs in tokio-rs are separate
+        // (repo, kind) pairs, so they each fire a notification.
+        let _guard = crate::notifications::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::notifications::set_capture_mode(true);
+        let _ = crate::notifications::take_captured();
+
+        let mut s = test_state();
+        s.config.notifications_enabled = true;
+        let e1 = ev("e1", "rust-lang/rust", EventKind::PrOpened, 100);
+        let e2 = ev("e2", "tokio-rs/tokio", EventKind::PrOpened, 50);
+        let _ = update(
+            &mut s,
+            Message::PolledCycle {
+                events: vec![("received", vec![e1, e2])],
+                errors: vec![],
+            },
+        );
+        let captured = crate::notifications::take_captured();
+        crate::notifications::set_capture_mode(false);
+        assert_eq!(captured.len(), 2, "got {captured:?}");
+        let bodies: std::collections::BTreeSet<String> =
+            captured.iter().map(|n| n.body.clone()).collect();
+        assert!(bodies.contains("rust-lang/rust: 1 PR opened"));
+        assert!(bodies.contains("tokio-rs/tokio: 1 PR opened"));
+    }
+
+    #[test]
+    fn toggle_notifications_flips_state() {
+        let _guard = crate::notifications::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::notifications::set_capture_mode(false);
+        let _ = crate::notifications::take_captured();
+
+        let mut s = test_state();
+        assert!(
+            !s.config.notifications_enabled,
+            "test_state should start with notifications disabled"
+        );
+        let _ = update(&mut s, Message::ToggleNotifications);
+        assert!(
+            s.config.notifications_enabled,
+            "ToggleNotifications should flip the flag to true"
+        );
+        let _ = update(&mut s, Message::ToggleNotifications);
+        assert!(
+            !s.config.notifications_enabled,
+            "a second ToggleNotifications should flip it back"
+        );
     }
 }

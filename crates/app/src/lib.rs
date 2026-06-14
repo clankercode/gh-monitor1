@@ -12,6 +12,7 @@ mod context_menu;
 mod demo;
 pub mod doctor;
 mod link;
+mod notifications;
 mod overlay;
 mod paint;
 pub mod settings;
