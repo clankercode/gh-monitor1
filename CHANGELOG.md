@@ -6,92 +6,94 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-06-14
+
 ### Added
-- **In-app Doctor diagnostics page.** The right-click context menu's
-  "Doctor…" entry now toggles a full-page Doctor view rendered by
-  the canvas (see `draw_doctor_page` in `crates/app/src/canvas.rs`).
-  The page lists every check (`config`, `pat`, `username`,
-  `orgs/repos`, `gtk`, `tray`, `display`, `filesystem`) with a
-  green/yellow/red bullet and the check's detail line. A
-  "checking…" subtitle is shown while the async run is in flight.
-- **In-app About page.** The right-click context menu's "About"
-  entry now toggles an About page rendered by the canvas (see
-  `draw_about_page` in `crates/app/src/canvas.rs`). The page
-  shows the version, the repository URL, and the license.
-- **Right-click context menu rendering.** The right-click context
-  menu is now drawn by the canvas (see `draw_context_menu` in
-  `crates/app/src/canvas.rs`) instead of being a no-op. Right-clicks
-  anywhere on the canvas open the menu at the cursor; the menu
-  walks the items top-to-bottom, draws a background, separator
-  rules, and a hover highlight on the item under the cursor.
+- **`gh` CLI auth piggy-back.** Optionally use `gh auth token` instead
+  of pasting a PAT. Configurable via the new `auth_source` field
+  (`pat` | `gh`); the init wizard prompts for which you want.
+- **whoami display.** The top-left of the overlay shows a small
+  avatar circle and "logged in as @login" (refreshed hourly and on
+  click).
+- **Demo mode button.** A clickable `▶` in the chrome row starts a
+  120-second scripted sequence of fake GitHub events. Drains at
+  1.0s intervals and exercises every animation path: new-node
+  fade-in, count pulse, group addition, standalone (new repo),
+  release. The button is glyph-only (24×24) so it doesn't occlude
+  the first node's time label, and uses a non-emoji `▶` (U+25B6)
+  that renders in any Unicode font.
+- **Notifications toggle.** Per-source new-event notifications,
+  aggregated by `(repo, event-kind)`. A new event in
+  `rust-lang/rust` for "PR opened" produces a single notification
+  "rust-lang: 3 PRs opened", not three. Shell out to `notify-send`
+  (Linux), `osascript` (macOS), or PowerShell `BurntToast`
+  (Windows). A clickable circle indicator in the chrome row toggles
+  the flag (no emoji dependency).
+- **Right-click context menu.** Settings, Show / Hide, Refresh now,
+  Doctor, About, Quit. Hover highlights the item, clicking outside
+  dismisses, separators don't hit-test. The menu is drawn on the
+  canvas (see `draw_context_menu` in `crates/app/src/canvas.rs`)
+  with background, separator rules, and per-item hit-testing.
+- **In-pane settings GUI.** Replaces the CLI-only flow. A column of
+  Iced `text_input` / `radio` / `checkbox` widgets for the PAT,
+  auth source, username, orgs, repos, poll interval, and
+  notifications toggle. Save / Cancel / Reset with validation.
+  Opened from the tray or the context menu. Changes propagate to
+  the poller on the next tick via a `tokio::sync::watch` channel.
+- **In-app Doctor page.** Eight checks (config, PAT, GitHub
+  username/org/repo, GTK, tray, display, filesystem). Reachable
+  from the context menu and from `gh-monitor doctor`. Rendered by
+  `draw_doctor_page` with a green/yellow/red bullet per check.
+- **In-app About page.** Version, repo URL, license. Reachable from
+  the context menu. Rendered by `draw_about_page`.
 
 ### Changed
-- **Status banner no longer overlaps the first node.** The layout
-  helper (`crates/app/src/paint.rs::layout`) now takes a
-  `has_status_banner` flag and pushes the first node down by 32px
-  (the height of the banner) when the banner is visible. The
-  banner keeps its existing y=4..36 footprint.
-- **Demo button is glyph-only.** The "🎬 Demo" button is now a
-  24×24 ▶-only hit-test rect (was 76×24 with the "Demo" text).
-  The smaller size means the first node's time label is no longer
-  occluded by the button.
-- **Standalone accent dot is now white.** Previously the
-  standalone-node accent dot shared its gold hue with the
-  background, making it nearly invisible. The dot is now white at
-  `opacity * 0.9` alpha so it pops against the gold background.
-- **Time label `max_width` is clamped to the node width.** The
-  time label's `max_width` was a hard-coded 200px, which could
-  bleed left of the node for narrow canvases. The label now
-  uses `rect.width - 24.0` (matches the repo label's clamp).
-- **`format_poll_status` is informative when all sources fail.**
-  When every source is an `AuthError`, the banner now reads
-  "all sources: 401 Unauthorized (check your PAT)" instead of the
-  uninformative "polling (0/N ok)". When every source is a
-  transient `Error`, the banner reads "all sources failing
-  (network?)". Single-source failures and partially-failing
-  setups still go through the existing per-source / counts path.
-- **Empty-state and pair-label line heights bumped.** 13pt text
-  in the empty state now uses a 20px line height (was 18px);
-  12pt text in the node's pair labels now uses 16px (was 14px).
+- **Default poll interval: 30s → 600s (10 minutes).** Configurable
+  in `config.toml` (`poll_interval_secs`).
+- **Per-source poll status banner** is now informative: when all
+  sources fail with auth, the banner reads `"all sources: 401
+  Unauthorized (check your PAT)"` instead of `"polling (0/6 ok)"`;
+  when all fail transiently, it reads `"all sources failing
+  (network?)"`. Single-source failures still go through the
+  per-source path.
+- **Poller re-reads config on change.** The `POLL_BUILD` static was
+  replaced with a `tokio::sync::watch` channel; settings changes
+  apply on the next poll without restart.
+- **Self-driven redraws.** The canvas's `update` requests a
+  redraw at +33ms iff any node's opacity or pulse animation is
+  in progress. Idle = no repaints.
+- **Status banner layout** — when the banner is visible, the first
+  node is pushed to `y = 44` (32px below the banner) so the two
+  no longer overlap.
+- **Empty-state and pair-label line heights bumped.** 13pt empty
+  state now uses 20px line height; 12pt pair labels use 16px.
+- **Standalone-node accent dot** is now white at high alpha
+  (previously shared its gold hue with the background, making it
+  nearly invisible).
+- **Time label `max_width`** clamped to `rect.width - 24` to
+  prevent bleed past the node's left edge.
+
+### Fixed
+- **Drag bug: clicking and dragging only worked the first time.**
+  The canvas's `and_capture()` on the hit-tested node was
+  shadowing the outer `MouseArea`'s `on_press` once a drag
+  ended on a node area. The canvas now publishes `OpenUrl` (no
+  capture) for nodes and `DragWindow` for empty area, and the
+  outer `MouseArea`'s `on_press` is gone.
+- **Demo button occluding time label** — narrowed from 76×24 to
+  24×24 glyph-only.
 
 ### Removed
-- **Dead `Vector` import and `Vector::new(0.0, 0.0)` no-op** in
-  `crates/app/src/canvas.rs`. The import was a no-op suppressor
-  for an unused import; the suppress was unnecessary because
-  the module has no other use of `iced::Vector`.
-
-### Added (notes)
-- **README** documents the `fonts-noto-color-emoji` requirement
-  for the bell icon (the demo button uses a non-emoji Unicode
-  triangle that renders in any Unicode font).
-- Demo mode.** A "🎬 Demo" button in the top-right of the canvas
-  replays a 120-second scripted sequence of ten fake GitHub events
-  across four repos (`rust-lang/rust`, `tokio-rs/tokio`,
-  `acme-corp/secret-project`, `serde-rs/serde`). The sequence
-  exercises every animation path the real poll path produces: a
-  new-node fade-in (rust-lang/rust, tokio-rs/tokio,
-  serde-rs/serde), an update pulse when a count goes from 1 → 2 →
-  3 in the same `(repo, kind)` group, a new group when a different
-  kind is added (rust-lang/rust gets `PrOpened`, then `PrMerged`,
-  then `IssueOpened`; tokio-rs/tokio gets `PrOpened`, then
-  `IssueOpened`, then a `PrOpened` pulse), a "new repo created"
-  standalone (acme-corp/secret-project with the gold accent), and
-  a release event. Events fire 1.0 s apart on whole-second
-  boundaries. While the demo is active the canvas shows a "Demo
-  running — XXs left" pill that counts down to 0; when the window
-  elapses the demo state is cleared and the final timeline stays
-  visible. Clicking the button again re-runs the script from a
-  clean slate. The demo is pure — it does not call the GitHub
-  API, write to the config file, or persist across restarts.
-  Implementation lives in `crates/app/src/demo.rs` (the
-  `DemoState` schedule + `drain_due`); the canvas renders the
-  button and indicator and hit-tests the button in
-  `crates/app/src/canvas.rs`; the `iced::time::every(100ms)`
-  subscription drives `Message::FrameTick` in
-  `crates/app/src/app.rs`. New tests cover the script shape, the
-  scheduled offsets, the `drain_due` cursor advance, the
-  `FrameTick` → `apply_events` integration, the auto-clear at
-  `DEMO_TOTAL_SECS`, and the button/indicator geometry.
+- `Message::ToggleDoctor`, `Message::ToggleAbout`,
+  `Message::OpenSettings` (replaced by the context-menu and tray
+  paths).
+- `static POLL_BUILD: Mutex<Option<(Auth, PollConfig)>>` (replaced
+  by the watch channel).
+- 🔔/🔕 emoji glyphs in the chrome (now `Path::circle` for the
+  notifications indicator — no font dependency on
+  `fonts-noto-color-emoji`).
+- Dead `Vector` import and `Vector::new(0.0, 0.0)` no-op in
+  `crates/app/src/canvas.rs`.
 
 ## [1.0.1] — 2026-06-13
 
@@ -379,7 +381,10 @@ implemented and tested. The project is production-ready.
   tests for the timeline grouping, and proptests for the humanize
   function.
 
-[Unreleased]: https://github.com/clankercode/gh-monitor1/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/clankercode/gh-monitor1/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/clankercode/gh-monitor1/compare/v1.0.2...v1.1.0
+[1.0.1]: https://github.com/clankercode/gh-monitor1/compare/v1.0.0...v1.0.1
+[1.0.0]: https://github.com/clankercode/gh-monitor1/compare/v0.3.2...v1.0.0
 [0.3.2]: https://github.com/clankercode/gh-monitor1/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/clankercode/gh-monitor1/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/clankercode/gh-monitor1/compare/v0.2.0...v0.3.0
