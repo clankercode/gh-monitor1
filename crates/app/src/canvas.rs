@@ -291,11 +291,49 @@ impl Program<Message, iced::Theme, iced::Renderer> for TimelineProgram {
         bounds: Rectangle,
         cursor: Cursor,
     ) -> Option<Action<Message>> {
+        let cursor_pos = cursor.position_in(bounds);
+
+        // Context menu takes priority over timeline interactions.
+        // While the menu is open, the menu's own hit-test owns
+        // mouse events: a left-click inside the menu picks the
+        // item, a click outside dismisses, and cursor movement
+        // updates the hover highlight. Without this gate the
+        // timeline's node/drag hit-test would fire under the menu
+        // and steal clicks.
+        if let Some(menu) = &self.context_menu {
+            match event {
+                Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+                    if let Some(p) = cursor_pos {
+                        return Some(Action::publish(Message::ContextMenuHover(
+                            menu.item_at(p, bounds),
+                        )));
+                    }
+                }
+                Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                    if let Some(p) = cursor_pos {
+                        if menu.contains(p, bounds) {
+                            if let Some(idx) = menu.item_at(p, bounds) {
+                                return Some(Action::publish(Message::ContextMenuItem(
+                                    menu.items[idx],
+                                )));
+                            }
+                        } else {
+                            return Some(Action::publish(Message::DismissContextMenu));
+                        }
+                    }
+                }
+                _ => {}
+            }
+            // The menu is open but the event is something the menu
+            // doesn't care about (e.g. a right-click or a keyboard
+            // event). Fall through to the redraw-request path below
+            // by returning None at the end of the function.
+        }
+
         let demo_active = self.demo_remaining_secs.is_some();
         let has_status_banner =
             self.status.is_some() && !self.snapshot.nodes.is_empty() && !demo_active;
         let (rects, _) = layout(&self.snapshot, bounds.width, has_status_banner);
-        let cursor_pos = cursor.position_in(bounds);
 
         if let Some(p) = cursor_pos {
             // Right-click on the canvas opens the context menu
@@ -1079,6 +1117,7 @@ fn draw_about_page(frame: &mut Frame, bounds: Rectangle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context_menu::MenuItem;
 
     #[test]
     fn empty_state_lines_setup_when_needs_setup() {
@@ -1561,6 +1600,90 @@ mod tests {
         assert!(p.show_about);
         assert_eq!(p.doctor_results.len(), 1);
         assert!(p.doctor_running);
+    }
+
+    #[test]
+    fn right_click_then_left_click_on_item_publishes_item_message() {
+        // A right-click opens the menu; a subsequent left-click
+        // on the FIRST item (Settings) must publish
+        // `Message::ContextMenuItem(MenuItem::Settings)` so the
+        // app opens the settings panel. Without the menu-aware
+        // path in `update`, this click would fall through to the
+        // empty-area hit-test and publish `Message::DragWindow`.
+        let mut p = TimelineProgram::new();
+        p.context_menu = Some(ContextMenu::new(Point::new(20.0, 20.0)));
+        let bounds = test_bounds();
+        let menu = p.context_menu.as_ref().unwrap();
+        let item0 = menu
+            .item_rect(0, bounds)
+            .expect("first item must have a rect");
+        let inside_item0 = Point::new(item0.x + item0.width / 2.0, item0.y + item0.height / 2.0);
+        let action = p.update(&mut (), &press_event(), bounds, cursor_at(inside_item0));
+        let (msg, _redraw, _status) = action.expect("expected action").into_inner();
+        let msg = msg.expect("expected a published message");
+        assert!(
+            matches!(msg, Message::ContextMenuItem(MenuItem::Settings)),
+            "expected ContextMenuItem(Settings), got {msg:?}"
+        );
+    }
+
+    #[test]
+    fn left_click_outside_menu_publishes_dismiss_message() {
+        // A right-click opens the menu; a subsequent left-click
+        // on empty canvas (outside the menu) must publish
+        // `Message::DismissContextMenu` so the menu closes. The
+        // hit-test must NOT publish `Message::DragWindow` or
+        // `Message::OpenUrl` — those are the timeline's job, and
+        // the menu is supposed to swallow all clicks while open.
+        let mut p = TimelineProgram::new();
+        p.context_menu = Some(ContextMenu::new(Point::new(20.0, 20.0)));
+        let bounds = test_bounds();
+        // Far from the menu's rect — top-left corner of the canvas
+        // is well outside the menu.
+        let outside = Point::new(2.0, 2.0);
+        let action = p.update(&mut (), &press_event(), bounds, cursor_at(outside));
+        let (msg, _redraw, _status) = action.expect("expected action").into_inner();
+        let msg = msg.expect("expected a published message");
+        assert!(
+            matches!(msg, Message::DismissContextMenu),
+            "expected DismissContextMenu, got {msg:?}"
+        );
+    }
+
+    #[test]
+    fn cursor_moved_over_menu_publishes_hover() {
+        // With the menu open, a CursorMoved event over the first
+        // item must publish `Message::ContextMenuHover(Some(0))`
+        // so the canvas's draw path highlights the item. A
+        // CursorMoved outside the menu must publish
+        // `Message::ContextMenuHover(None)` so the highlight
+        // clears. Without this path the menu is unhoverable.
+        let mut p = TimelineProgram::new();
+        p.context_menu = Some(ContextMenu::new(Point::new(20.0, 20.0)));
+        let bounds = test_bounds();
+        let menu = p.context_menu.as_ref().unwrap();
+        let item0 = menu
+            .item_rect(0, bounds)
+            .expect("first item must have a rect");
+        let inside = Point::new(item0.x + 4.0, item0.y + 4.0);
+        let move_event = Event::Mouse(mouse::Event::CursorMoved { position: inside });
+        let action = p.update(&mut (), &move_event, bounds, cursor_at(inside));
+        let (msg, _redraw, _status) = action.expect("expected action").into_inner();
+        let msg = msg.expect("expected a published message");
+        assert!(
+            matches!(msg, Message::ContextMenuHover(Some(0))),
+            "expected ContextMenuHover(Some(0)), got {msg:?}"
+        );
+
+        // Now move outside the menu — the hover must clear.
+        let outside = Point::new(2.0, 2.0);
+        let action = p.update(&mut (), &move_event, bounds, cursor_at(outside));
+        let (msg, _redraw, _status) = action.expect("expected action").into_inner();
+        let msg = msg.expect("expected a published message");
+        assert!(
+            matches!(msg, Message::ContextMenuHover(None)),
+            "expected ContextMenuHover(None), got {msg:?}"
+        );
     }
 
     // ---- empty-state / pair-label line-height tests ----
