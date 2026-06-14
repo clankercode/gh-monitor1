@@ -78,9 +78,8 @@ pub struct State {
     /// subscription drains due scripted events.
     pub demo: Option<demo::DemoState>,
     /// `true` when the in-pane settings panel is showing in place of
-    /// the timeline. Toggled by `TrayAction::OpenSettings`,
-    /// `Message::OpenSettings`, and the right-click context menu's
-    /// "Settings…" item.
+    /// the timeline. Toggled by `TrayAction::OpenSettings` and the
+    /// right-click context menu's "Settings…" item.
     pub show_settings: bool,
     /// The right-click context menu, if open. `None` when dismissed.
     pub context_menu: Option<ContextMenu>,
@@ -335,15 +334,8 @@ pub enum Message {
     /// The cursor moved over the canvas. Used to highlight the
     /// hovered context menu item.
     ContextMenuHover(Option<usize>),
-    /// Toggle the in-app Doctor diagnostics page.
-    ToggleDoctor,
-    /// Toggle the About page.
-    ToggleAbout,
     /// Doctor check finished; the results are ready to render.
     DoctorResults(Vec<crate::doctor::CheckResult>),
-    /// Open the in-pane settings panel. Fired by the tray menu and the
-    /// right-click context menu's "Settings…" item.
-    OpenSettings,
     /// User typed into one of the settings form's fields. The new
     /// value is stored verbatim; parsing / validation happens on Save.
     SettingsFieldChanged(SettingsField, String),
@@ -625,22 +617,6 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             }
             Task::none()
         }
-        Message::ToggleDoctor => {
-            state.show_doctor = !state.show_doctor;
-            let needs_run = state.show_doctor && state.doctor_results.is_empty();
-            state.doctor_running = state.show_doctor;
-            sync_program(state);
-            if needs_run {
-                run_doctor_async()
-            } else {
-                Task::none()
-            }
-        }
-        Message::ToggleAbout => {
-            state.show_about = !state.show_about;
-            sync_program(state);
-            Task::none()
-        }
         Message::DoctorResults(results) => {
             state.doctor_results = results;
             state.doctor_running = false;
@@ -696,10 +672,6 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                 state.demo = None;
             }
             sync_program(state);
-            Task::none()
-        }
-        Message::OpenSettings => {
-            open_settings(state);
             Task::none()
         }
         Message::SettingsFieldChanged(field, value) => {
@@ -1346,8 +1318,6 @@ fn tray_subscription() -> Subscription<Message> {
     })
 }
 
-static POLL_BUILD: Mutex<Option<(Auth, PollConfig)>> = Mutex::new(None);
-
 /// One-shot wake-up for the poller subscription. `notify_one()`
 /// posts a single permit; the subscription's `notified().await`
 /// consumes it. Storing it in a `LazyLock` keeps the construction
@@ -1372,11 +1342,11 @@ type PollConfigPayload = Option<(Auth, PollConfig)>;
 /// `install_poller_if_configured` writes to this whenever the user
 /// saves a new config (startup, settings save, PAT change); the
 /// poller subscription holds a `watch::Receiver` and rebuilds
-/// itself with the new config whenever the value changes. This
-/// replaces the previous `POLL_BUILD: Mutex<Option<…>>` pattern,
-/// which was consumed once on first use and never updated, so
-/// post-startup config changes (the v1.1 settings flow) never
-/// reached the running poller.
+/// itself with the new config whenever the value changes. The
+/// `POLL_CONFIG` watch channel replaces an earlier
+/// `Mutex<Option<…>>` pattern, which was consumed once on first use
+/// and never updated, so post-startup config changes (the v1.1
+/// settings flow) never reached the running poller.
 ///
 /// The channel is initialised with `None`, which matches the
 /// previous startup behaviour (no poller until a config is
@@ -1408,8 +1378,8 @@ static POLL_CONFIG: std::sync::LazyLock<(
 pub fn install_poller_if_configured(initial: &Config) -> bool {
     if initial.pat.trim().is_empty() {
         // No PAT: signal the poller subscription to drop any
-        // running poller. The previous `POLL_BUILD: Mutex<Option>`
-        // pattern returned early in this branch; the new watch
+        // running poller. The earlier `Mutex<Option<…>>` pattern
+        // returned early in this branch; the `POLL_CONFIG` watch
         // channel actively publishes `None` so a settings save
         // that clears the PAT also tears down the live poller.
         let _ = POLL_CONFIG.0.send(None);
@@ -1468,12 +1438,13 @@ mod tests {
     use gh_monitor_gh::{EventKind, RawEvent};
 
     /// Serialises the three `install_poller_*` tests so the shared
-    /// `POLL_CONSTRUCTION_ERROR` and `POLL_BUILD` statics don't race
-    /// with a parallel test's `install_poller_if_configured` write.
-    /// Cargo runs tests in parallel within a binary by default; the
-    /// lock-drain pattern alone isn't enough because the
-    /// `install_poller_if_configured` call and the subsequent
-    /// assertion are not atomic w.r.t. another test's call.
+    /// `POLL_CONSTRUCTION_ERROR` static and the `POLL_CONFIG` watch
+    /// channel don't race with a parallel test's
+    /// `install_poller_if_configured` write. Cargo runs tests in
+    /// parallel within a binary by default; the lock-drain pattern
+    /// alone isn't enough because the `install_poller_if_configured`
+    /// call and the subsequent assertion are not atomic w.r.t.
+    /// another test's call.
     static POLL_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn ev(id: &str, repo: &str, kind: EventKind, secs_ago: i64) -> RawEvent {

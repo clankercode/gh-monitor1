@@ -508,9 +508,12 @@ fn demo_indicator_rect(bounds: Rectangle) -> Rectangle {
 }
 
 /// Draw the bell icon in the top-right of the canvas. `enabled`
-/// picks the glyph (🔔 / 🔕) and `hovered` adds a subtle
-/// background pad so the user can see the click target. Sits
-/// to the LEFT of the demo button in the same top row.
+/// picks the indicator (filled gold circle when notifications
+/// are on, outlined gray circle when off) and `hovered` adds a
+/// subtle background pad so the user can see the click target.
+/// Sits to the LEFT of the demo button in the same top row.
+/// The indicator is a `Path::circle` so it never depends on an
+/// emoji font being installed.
 fn draw_bell(frame: &mut Frame, bounds: Rectangle, enabled: bool, hovered: bool) {
     let rect = bell_rect(bounds);
     if hovered {
@@ -529,30 +532,31 @@ fn draw_bell(frame: &mut Frame, bounds: Rectangle, enabled: bool, hovered: bool)
             },
         );
     }
-    let glyph = if enabled { "\u{1F514}" } else { "\u{1F515}" };
-    let color = if enabled {
-        Color {
-            r: 1.0,
-            g: 0.90,
-            b: 0.55,
-            a: 0.95,
-        }
+    let center = Point::new(rect.x + rect.width / 2.0, rect.y + rect.height / 2.0);
+    let dot = Path::circle(center, 8.0);
+    if enabled {
+        frame.fill(
+            &dot,
+            Color {
+                r: 1.0,
+                g: 0.90,
+                b: 0.55,
+                a: 0.95,
+            },
+        );
     } else {
-        Color {
-            r: 0.65,
-            g: 0.65,
-            b: 0.70,
-            a: 0.85,
-        }
-    };
-    frame.fill_text(canvas::Text {
-        content: glyph.to_string(),
-        position: Point::new(rect.x + 4.0, rect.y + 2.0),
-        max_width: rect.width,
-        color,
-        size: 16.0.into(),
-        ..canvas::Text::default()
-    });
+        frame.stroke(
+            &dot,
+            Stroke::default()
+                .with_color(Color {
+                    r: 0.65,
+                    g: 0.65,
+                    b: 0.70,
+                    a: 0.85,
+                })
+                .with_width(1.5),
+        );
+    }
 }
 
 /// Draw the "▶" demo button in the top-right corner. The button is
