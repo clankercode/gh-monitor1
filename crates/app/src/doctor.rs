@@ -107,26 +107,37 @@ impl CheckResult {
 /// client fails to build.
 pub fn run() -> Result<()> {
     let path = config_path();
-    let config = load_effective_config(&path);
-    let http = build_http_client().context("building HTTP client")?;
+    let results = run_all(&path)?;
     let use_color = io::stdout().is_terminal();
+    let mut out = io::stdout().lock();
+    for r in &results {
+        writeln_check(&mut out, r, use_color).context("writing check result")?;
+    }
+    let code = exit_code(&results);
+    std::process::exit(code);
+}
+
+/// Run every doctor check and return the result list. Pure data — no
+/// printing, no `process::exit`. Used by the in-app "Doctor…" page in
+/// the right-click context menu to surface the same diagnostics
+/// inside the overlay.
+///
+/// The caller picks the config file path; passing the live config
+/// file's `config_path()` is the canonical choice. Returns `Err` only
+/// if the HTTP client cannot be built.
+pub fn run_all(path: &Path) -> Result<Vec<CheckResult>> {
+    let config = load_effective_config(path);
+    let http = build_http_client().context("building HTTP client")?;
 
     let mut results: Vec<CheckResult> = Vec::with_capacity(8);
-    results.push(check_config(&path));
+    results.push(check_config(path));
     results.push(check_pat(&config));
     results.extend(run_network_checks(&config, &http));
     results.push(check_gtk());
     results.push(check_tray());
     results.push(check_display());
-    results.push(check_filesystem(&path));
-
-    let mut out = io::stdout().lock();
-    for r in &results {
-        writeln_check(&mut out, r, use_color).context("writing check result")?;
-    }
-
-    let code = exit_code(&results);
-    std::process::exit(code);
+    results.push(check_filesystem(path));
+    Ok(results)
 }
 
 /// Prefer the on-disk config if it exists and parses, otherwise fall
@@ -494,6 +505,30 @@ mod tests {
     fn exit_code_fail_only_is_one() {
         let results = vec![CheckResult::fail("a", "x")];
         assert_eq!(exit_code(&results), 1);
+    }
+
+    #[test]
+    fn run_all_returns_eight_results_for_missing_config() {
+        // With a config path that does not exist, `run_all` still
+        // returns one CheckResult per check (config warn, pat warn,
+        // username warn, orgs/repos warn, gtk ok, tray ok, display
+        // ok/warn, filesystem ok) — i.e. the eight checks the loop
+        // schedules. The exact status set depends on the host
+        // (DISPLAY, GTK init), so we only assert length and that
+        // every entry has a non-empty label and detail.
+        let path = std::env::temp_dir().join("gh-monitor-run-all-missing.toml");
+        let _ = std::fs::remove_file(&path);
+        let results = run_all(&path).expect("run_all should succeed");
+        assert_eq!(results.len(), 8, "got {results:#?}");
+        for r in &results {
+            assert!(!r.label.is_empty(), "empty label in {r:?}");
+            assert!(!r.detail.is_empty(), "empty detail in {r:?}");
+        }
+        // The first four are always config, pat, username, orgs/repos.
+        assert_eq!(results[0].label, "config");
+        assert_eq!(results[1].label, "pat");
+        assert_eq!(results[2].label, "username");
+        assert_eq!(results[3].label, "orgs/repos");
     }
 
     #[test]

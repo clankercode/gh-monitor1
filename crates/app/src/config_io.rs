@@ -22,6 +22,10 @@ pub const CONFIG_TEMPLATE: &str = r#"# gh-monitor config
 # Personal access token (required)
 pat = ""
 
+# Where to source the token from: "pat" (use the `pat` field above) or
+# "gh" (shell out to `gh auth token`). Defaults to "pat" when omitted.
+# auth_source = "pat"
+
 # GitHub username (used to fetch `received_events`)
 # username = "octocat"
 
@@ -32,7 +36,11 @@ pat = ""
 # repos = ["octocat/Hello-World"]
 
 # Poll interval in seconds
-poll_interval_secs = 30
+poll_interval_secs = 600
+
+# Fire a desktop notification for each new batch of activity
+# (off by default — toggle the bell in the overlay's settings panel)
+# notifications_enabled = true
 "#;
 
 /// Write the config template to `path` if no file is there yet. Returns
@@ -117,8 +125,8 @@ pub fn default_config() -> Config {
         username,
         orgs,
         repos,
-        poll_interval_secs: 30,
-        window_position: None,
+        poll_interval_secs: 600,
+        ..Config::default()
     }
 }
 
@@ -160,8 +168,9 @@ mod tests {
             username: Some("octocat".to_string()),
             orgs: vec!["rust-lang".to_string()],
             repos: vec!["octocat/Hello-World".to_string()],
-            poll_interval_secs: 30,
+            poll_interval_secs: 600,
             window_position: Some(WindowPosition { x: 100, y: 200 }),
+            ..Config::default()
         }
     }
 

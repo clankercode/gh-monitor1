@@ -43,6 +43,12 @@ Requires Rust 1.89+ and `just`. On Linux you also need GTK 3, libxdo, and
 libappindicator for the tray icon. See [Iced's prerequisites](https://github.com/iced-rs/iced#prerequisites)
 plus `libgtk-3-dev libxdo-dev libayatana-appindicator3-dev`.
 
+> **Note on emoji rendering.** The bell icon in the canvas chrome uses
+> the 🔔/🔕 glyphs, which require an emoji font installed on the
+> system. On Linux, install `fonts-noto-color-emoji` (Debian/Ubuntu)
+> or `noto-fonts-emoji` (Arch/Fedora) so the bell renders in colour.
+> Without it the bell will appear as a missing-glyph box.
+
 ```bash
 git clone https://github.com/clankercode/gh-monitor1
 cd gh-monitor1
@@ -104,8 +110,8 @@ orgs = ["rust-lang", "tokio-rs"]
 # Individual repos to watch (in addition to the above orgs)
 repos = ["octocat/Hello-World"]
 
-# Poll interval in seconds. Default 30.
-poll_interval_secs = 30
+# Poll interval in seconds. Default 600 (10 minutes).
+poll_interval_secs = 600
 ```
 
 You can also point the app at a config by setting environment variables
