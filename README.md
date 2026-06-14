@@ -43,6 +43,12 @@ Requires Rust 1.89+ and `just`. On Linux you also need GTK 3, libxdo, and
 libappindicator for the tray icon. See [Iced's prerequisites](https://github.com/iced-rs/iced#prerequisites)
 plus `libgtk-3-dev libxdo-dev libayatana-appindicator3-dev`.
 
+> **Note on emoji rendering.** The bell icon in the canvas chrome uses
+> the 🔔/🔕 glyphs, which require an emoji font installed on the
+> system. On Linux, install `fonts-noto-color-emoji` (Debian/Ubuntu)
+> or `noto-fonts-emoji` (Arch/Fedora) so the bell renders in colour.
+> Without it the bell will appear as a missing-glyph box.
+
 ```bash
 git clone https://github.com/clankercode/gh-monitor1
 cd gh-monitor1

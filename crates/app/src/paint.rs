@@ -32,13 +32,28 @@ pub struct CanvasSize {
 const NODE_HEIGHT: f32 = 56.0;
 const NODE_GAP: f32 = 8.0;
 const PADDING: f32 = 12.0;
+/// Vertical offset reserved for the status banner at the top of the
+/// canvas. When the banner is visible the first node starts at
+/// `PADDING + STATUS_BANNER_RESERVED` so the banner (y=4..36) does
+/// not overlap the first node.
+const STATUS_BANNER_RESERVED: f32 = 32.0;
 
-/// Layout the snapshot's nodes into rectangles. Top-down, fixed height per
-/// node, single column. The total height is computed.
-pub fn layout(snapshot: &TimelineSnapshot, max_width: f32) -> (Vec<NodeRect>, CanvasSize) {
+/// Layout the snapshot's nodes into rectangles. Top-down, fixed
+/// height per node, single column. The total height is computed.
+/// When `has_status_banner` is `true` the first node starts
+/// `STATUS_BANNER_RESERVED` pixels lower so the status banner
+/// (rendered separately at y=4..36) does not overlap it.
+pub fn layout(
+    snapshot: &TimelineSnapshot,
+    max_width: f32,
+    has_status_banner: bool,
+) -> (Vec<NodeRect>, CanvasSize) {
     let mut rects = Vec::with_capacity(snapshot.nodes.len());
     let width = max_width;
     let mut y = PADDING;
+    if has_status_banner {
+        y += STATUS_BANNER_RESERVED;
+    }
     for (i, _node) in snapshot.nodes.iter().enumerate() {
         rects.push(NodeRect {
             index: i,
@@ -124,7 +139,7 @@ mod tests {
     #[test]
     fn layout_empty() {
         let snap = TimelineSnapshot::default();
-        let (rects, size) = layout(&snap, 400.0);
+        let (rects, size) = layout(&snap, 400.0, false);
         assert!(rects.is_empty());
         assert!(size.height >= PADDING);
     }
@@ -138,7 +153,7 @@ mod tests {
                 node("e/f", NodeKind::Group),
             ],
         };
-        let (rects, size) = layout(&snap, 400.0);
+        let (rects, size) = layout(&snap, 400.0, false);
         assert_eq!(rects.len(), 3);
         assert!(rects[0].y < rects[1].y);
         assert!(rects[1].y < rects[2].y);
@@ -147,11 +162,35 @@ mod tests {
     }
 
     #[test]
+    fn layout_pushes_first_node_down_when_status_banner_set() {
+        // The status banner sits at y=4..36. With it visible the
+        // first node must start BELOW the banner (y >= 36) so it
+        // doesn't get covered. Without the banner the first node
+        // starts at PADDING.
+        let snap = TimelineSnapshot {
+            nodes: vec![node("a/b", NodeKind::Group)],
+        };
+        let (with_banner, _) = layout(&snap, 400.0, true);
+        let (no_banner, _) = layout(&snap, 400.0, false);
+        assert!(
+            (with_banner[0].y - no_banner[0].y - STATUS_BANNER_RESERVED).abs() < 0.01,
+            "banner offset must equal STATUS_BANNER_RESERVED, got {} vs {}",
+            with_banner[0].y,
+            no_banner[0].y
+        );
+        assert!(
+            with_banner[0].y >= 36.0,
+            "first node must start at or below the banner's bottom edge (36), got {}",
+            with_banner[0].y
+        );
+    }
+
+    #[test]
     fn hit_test_inside() {
         let snap = TimelineSnapshot {
             nodes: vec![node("a/b", NodeKind::Group)],
         };
-        let (rects, _) = layout(&snap, 400.0);
+        let (rects, _) = layout(&snap, 400.0, false);
         let inside = iced::Point::new(rects[0].x + 5.0, rects[0].y + 5.0);
         let outside = iced::Point::new(0.0, 0.0);
         assert!(rects[0].contains(inside));

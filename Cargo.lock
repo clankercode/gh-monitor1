@@ -1592,7 +1592,7 @@ dependencies = [
 
 [[package]]
 name = "gh-monitor-app"
-version = "1.0.2"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1621,7 +1621,7 @@ dependencies = [
 
 [[package]]
 name = "gh-monitor-config"
-version = "1.0.2"
+version = "1.1.0"
 dependencies = [
  "dirs 5.0.1",
  "serde",
@@ -1632,7 +1632,7 @@ dependencies = [
 
 [[package]]
 name = "gh-monitor-gh"
-version = "1.0.2"
+version = "1.1.0"
 dependencies = [
  "chrono",
  "dirs 5.0.1",
@@ -1650,7 +1650,7 @@ dependencies = [
 
 [[package]]
 name = "gh-monitor-timeline"
-version = "1.0.2"
+version = "1.1.0"
 dependencies = [
  "chrono",
  "gh-monitor-gh",

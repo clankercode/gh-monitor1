@@ -183,9 +183,17 @@ impl PollStatus {
 ///
 /// Rules:
 /// - All sources `Ok` (or empty) → `None`.
-/// - Exactly one source has a non-`Ok` status → "`<source>`: <message>"
-///   (with the `org/` / `repo/` prefix stripped for display).
-/// - Two or more sources have non-`Ok` status →
+/// - Two or more sources AND all are `AuthError` → "all sources:
+///   401 Unauthorized (check your PAT)" so the user gets a clear
+///   hint that the token is the problem (not transient network).
+/// - Two or more sources AND all are transient `Error` → "all
+///   sources failing (network?)" so the user can distinguish "no
+///   network" from "bad credentials".
+/// - Exactly one source has a non-`Ok` status → "`<source>`:
+///   <message>" (with the `org/` / `repo/` prefix stripped for
+///   display). Single-source failures are always shown
+///   per-source — the user needs to know which one failed.
+/// - Two or more sources with mixed failure kinds →
 ///   "polling (<ok>/<total> ok)".
 /// - `AuthError` is preferred over `Error` when picking the single-error
 ///   source.
@@ -193,24 +201,50 @@ pub(crate) fn format_poll_status(status: &PollStatus) -> Option<String> {
     if status.is_empty() {
         return None;
     }
-    let errored: Vec<&SourceStatus> = status
+    let total = status.len();
+    let non_ok: Vec<&SourceStatus> = status
         .iter()
         .filter(|s| !matches!(s.kind, SourceStatusKind::Ok))
         .collect();
-    if errored.is_empty() {
+    if non_ok.is_empty() {
         return None;
     }
-    if errored.len() == 1 {
-        let s = errored[0];
+    // All-fail cases first, but only when there are MULTIPLE
+    // sources AND every source is failing — a single source's
+    // per-source message is more informative ("poller: repo
+    // 'a/b/c' must be in 'owner/name' form") than the generic
+    // "all sources: 401 Unauthorized", and a partially-failing
+    // setup deserves the counts form.
+    if non_ok.len() == total && non_ok.len() > 1 && non_ok.iter().all(|s| is_auth_source_status(s))
+    {
+        return Some("all sources: 401 Unauthorized (check your PAT)".to_string());
+    }
+    if non_ok.len() == total
+        && non_ok.len() > 1
+        && non_ok.iter().all(|s| is_transient_source_status(s))
+    {
+        return Some("all sources failing (network?)".to_string());
+    }
+    if non_ok.len() == 1 {
+        let s = non_ok[0];
         let msg = match &s.kind {
             SourceStatusKind::Error(m) | SourceStatusKind::AuthError(m) => m.clone(),
             SourceStatusKind::Ok => unreachable!(),
         };
         return Some(format!("{}: {msg}", display_source(s.source)));
     }
-    let total = status.len();
-    let ok = total - errored.len();
+    let ok = total - non_ok.len();
     Some(format!("polling ({ok}/{total} ok)"))
+}
+
+/// `true` when a `SourceStatus` is an auth-class error.
+fn is_auth_source_status(s: &SourceStatus) -> bool {
+    matches!(s.kind, SourceStatusKind::AuthError(_))
+}
+
+/// `true` when a `SourceStatus` is a transient (non-auth) error.
+fn is_transient_source_status(s: &SourceStatus) -> bool {
+    matches!(s.kind, SourceStatusKind::Error(_))
 }
 
 /// Strip the `org/` or `repo/` prefix from a source label for display.
@@ -1032,6 +1066,11 @@ fn sync_program(state: &mut State) {
         .as_ref()
         .map(|d| d.remaining_secs(Instant::now()));
     state.program.notifications_enabled = state.config.notifications_enabled;
+    state.program.context_menu = state.context_menu.clone();
+    state.program.show_doctor = state.show_doctor;
+    state.program.show_about = state.show_about;
+    state.program.doctor_results = state.doctor_results.clone();
+    state.program.doctor_running = state.doctor_running;
 }
 
 /// Compute the per-(repo, kind) count delta introduced by `diff`.
@@ -1415,6 +1454,48 @@ mod tests {
             format_poll_status(&only_mozilla),
             Some("mozilla: 500 Server Error".to_string())
         );
+    }
+
+    #[test]
+    fn poll_status_all_auth_returns_helpful_message() {
+        // When every source is an auth error the user has a token
+        // problem, not a network problem. The uninformative
+        // "polling (0/N ok)" must NOT appear; instead the banner
+        // must call out the PAT explicitly.
+        let mut s = PollStatus::default();
+        s.record_auth_error("org/rust-lang", "401".to_string());
+        s.record_auth_error("repo/octocat/Hello-World", "401".to_string());
+        s.record_auth_error("received", "401".to_string());
+        assert_eq!(
+            format_poll_status(&s),
+            Some("all sources: 401 Unauthorized (check your PAT)".to_string())
+        );
+    }
+
+    #[test]
+    fn poll_status_all_transient_returns_helpful_message() {
+        // When every source is a transient (non-auth) error, the
+        // user has a network problem, not a credentials problem.
+        let mut s = PollStatus::default();
+        s.record_error("org/rust-lang", "500 Server Error".to_string());
+        s.record_error("repo/octocat/Hello-World", "503".to_string());
+        assert_eq!(
+            format_poll_status(&s),
+            Some("all sources failing (network?)".to_string())
+        );
+    }
+
+    #[test]
+    fn poll_status_mixed_falls_through_to_counts() {
+        // A mix of auth and transient errors is NOT an
+        // all-auth case (some are transient). The uninformative
+        // counts form is acceptable here.
+        let mut s = PollStatus::default();
+        s.record_ok("received");
+        s.record_auth_error("org/rust-lang", "401".to_string());
+        s.record_error("repo/octocat/Hello-World", "500".to_string());
+        // 1 ok, 2 errored (mixed kinds) → counts form.
+        assert_eq!(format_poll_status(&s), Some("polling (1/3 ok)".to_string()));
     }
 
     #[test]
